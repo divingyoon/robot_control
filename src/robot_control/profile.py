@@ -66,6 +66,11 @@ class Group:
     # derived: the asset generator and the bringup description chose their tool
     # frames independently.
     asset_tip_link: str | None = None
+    # Where this group's joints are published, when that is not the robot-wide
+    # `/joint_states`. A hand driven by its own controller_manager runs under a
+    # namespace of its own and publishes there instead — not as well as, so a
+    # reader on the default topic never sees the group at all.
+    state_topic: str | None = None
 
     @property
     def executable(self) -> bool:
@@ -166,6 +171,7 @@ def _group(name: str, body: dict[str, Any]) -> Group:
     effort_controller = body.get("effort_controller")
     hdgp_group = body.get("hdgp_group")
     asset_tip_link = body.get("asset_tip_link")
+    state_topic = body.get("state_topic")
     if moveit_group is None and tip_link is not None:
         # The tip link is only ever used as the IK frame of a planning group.
         raise ProfileError(f"group {name} declares a tip_link without a moveit_group")
@@ -196,6 +202,7 @@ def _group(name: str, body: dict[str, Any]) -> Group:
         ),
         hdgp_group=None if hdgp_group is None else str(hdgp_group),
         asset_tip_link=None if asset_tip_link is None else str(asset_tip_link),
+        state_topic=None if state_topic is None else str(state_topic),
     )
 
 

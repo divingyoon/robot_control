@@ -15,9 +15,17 @@ Widths rather than endpoints, because the bimanual xacro mirrors each arm and
 offsets joint 2 by a quarter turn per side. Mirroring and offsetting both
 preserve a range's width, so this compares the invariant instead of restating
 the transform and drifting from it.
+
+The DG5F hand carried the same placeholder shape for longer: a round +-1.5 on
+all twenty joints. The hand's ranges are not symmetric and mostly not centred
+on zero — the thumb's second joint only travels negative, the other fingers'
+only positive — so a symmetric bound authorizes a curl command that drives four
+fingers straight into their stops. Endpoints rather than widths there: the
+right hand is described in its own frame, with nothing mirroring it.
 """
 
 from pathlib import Path
+from xml.etree import ElementTree
 
 import pytest
 import yaml
@@ -29,6 +37,10 @@ from robot_control.srdf import repository_root
 LIMITS = "ros_ws/src/openarm_description/config/arm/v10/joint_limits.yaml"
 ARM_GROUPS = ("openarm_right_arm", "openarm_left_arm")
 TOLERANCE_RAD = 1e-3
+
+#: The vendored Tesollo description, the hand's equivalent of the arm's
+#: joint_limits.yaml. Snapshot under vendor_metadata/tesollo.
+HAND_DESCRIPTION = "ros_ws/src/delto_m_ros2/dg_description/urdf/dg5f_right.urdf"
 
 
 @pytest.fixture(scope="module")
@@ -82,6 +94,66 @@ def test_no_joint_may_be_driven_past_what_the_hardware_is_rated_for(profile, des
 def test_commanded_speed_stays_within_the_description(profile, described):
     for joint, key in _arm_joints(profile):
         rated = float(described[key]["velocity"])
+
+        assert joint.velocity <= rated, (
+            f"{joint.canonical} allows {joint.velocity:g} rad/s against a rated "
+            f"{rated:g}"
+        )
+
+
+HAND_GROUPS = ("tesollo_abduction", "tesollo_curl", "tesollo_pip", "tesollo_dip")
+
+
+@pytest.fixture(scope="module")
+def described_hand():
+    path = repository_root() / HAND_DESCRIPTION
+    if not path.is_file():
+        pytest.skip(f"vendored hand description not found: {path}")
+    root = ElementTree.parse(path).getroot()
+    return {
+        joint.get("name"): joint.find("limit")
+        for joint in root.findall("joint")
+        if joint.find("limit") is not None
+    }
+
+
+def _hand_joints(profile):
+    """Each hand joint, paired with the vendor joint the profile maps it to."""
+    by_canonical = {joint.canonical: joint for joint in profile.joints}
+    for group_name in HAND_GROUPS:
+        for canonical in profile.groups[group_name].joints:
+            yield by_canonical[canonical]
+
+
+def test_every_hand_joint_ends_where_the_description_ends(profile, described_hand):
+    for joint in _hand_joints(profile):
+        limit = described_hand[joint.source]
+        lower, upper = float(limit.get("lower")), float(limit.get("upper"))
+
+        assert (joint.lower, joint.upper) == pytest.approx(
+            (lower, upper), abs=TOLERANCE_RAD
+        ), (
+            f"{joint.canonical} is bounded [{joint.lower:+.4f}, {joint.upper:+.4f}] "
+            f"against the description's [{lower:+.4f}, {upper:+.4f}]; a bound "
+            "wider than the stop authorizes a command the finger cannot reach"
+        )
+
+
+def test_no_hand_joint_may_be_driven_past_what_the_hardware_is_rated_for(
+    profile, described_hand
+):
+    for joint in _hand_joints(profile):
+        rated = float(described_hand[joint.source].get("effort"))
+
+        assert joint.effort <= rated, (
+            f"{joint.canonical} authorizes {joint.effort:g} N.m against a rated "
+            f"{rated:g}"
+        )
+
+
+def test_commanded_hand_speed_stays_within_the_description(profile, described_hand):
+    for joint in _hand_joints(profile):
+        rated = float(described_hand[joint.source].get("velocity"))
 
         assert joint.velocity <= rated, (
             f"{joint.canonical} allows {joint.velocity:g} rad/s against a rated "

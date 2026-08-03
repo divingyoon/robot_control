@@ -55,6 +55,7 @@ groups:
     joints: [h1]
     controller: hand_controller
     action: parallel_gripper_command
+    state_topic: /hand_ns/joint_states
   idle:
     joints: [x1]
 ros:
@@ -205,6 +206,33 @@ def test_adapter_reports_unavailable_when_rclpy_is_missing(profile, monkeypatch)
 
     with pytest.raises(AdapterUnavailable, match="rclpy"):
         RosAdapter(profile, "arm", execute=True)
+
+
+def test_the_backend_listens_where_the_group_publishes_its_state(profile, monkeypatch):
+    """A hand on its own controller_manager publishes its own /joint_states.
+
+    Subscribing to the default topic for such a group is not a partial read —
+    the hand's joints never appear on it at all, so `pose joints` fails on a
+    timeout that reads as "bringup is not running" while the bringup runs.
+    """
+    subscribed = []
+
+    class _Backend:
+        def __init__(self, node_name, joint_topic):
+            subscribed.append((node_name, joint_topic))
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr("robot_control.ros_adapter._RclpyBackend", _Backend)
+
+    RosAdapter(profile, "arm")
+    RosAdapter(profile, "hand")
+
+    assert [topic for _, topic in subscribed] == [
+        "/joint_states",
+        "/hand_ns/joint_states",
+    ]
 
 
 def test_adapter_rejects_a_group_without_a_controller(profile):

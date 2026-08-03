@@ -32,6 +32,10 @@ from .track import Recording
 MOVEIT_SUCCESS = 1
 DEFAULT_TIMEOUT_SEC = 10.0
 
+#: Where joint positions come from for a group that does not say otherwise.
+#: A group under its own controller_manager overrides it with `state_topic`.
+JOINT_STATES_TOPIC = "/joint_states"
+
 # MoveIt's RobotInteraction names each end-effector marker after the parent
 # link of the SRDF end effector, which is why tip_link has to be that same link.
 MARKER_PREFIX = "EE:goal_"
@@ -164,7 +168,11 @@ class RosAdapter:
         # only putting a goal on the wire needs --execute.
         self.execute = execute
         self.interface = CanonicalInterface(profile)
-        self._backend = backend if backend is not None else _RclpyBackend(node_name)
+        self._backend = (
+            backend
+            if backend is not None
+            else _RclpyBackend(node_name, group.state_topic or JOINT_STATES_TOPIC)
+        )
         self._recording = False
 
     def __enter__(self) -> RosAdapter:
@@ -176,10 +184,15 @@ class RosAdapter:
     def close(self) -> None:
         self._backend.close()
 
+    @property
+    def state_topic(self) -> str:
+        """Where this group's joint positions are published."""
+        return self.group.state_topic or JOINT_STATES_TOPIC
+
     def read_source_state(
         self, timeout_sec: float = DEFAULT_TIMEOUT_SEC
     ) -> dict[str, float]:
-        """Return the latest ``/joint_states``, keyed by source joint name."""
+        """Return the latest joint state, keyed by source joint name."""
         return self._backend.joint_states(timeout_sec)
 
     def read_state(self, timeout_sec: float = DEFAULT_TIMEOUT_SEC) -> np.ndarray:
@@ -191,7 +204,8 @@ class RosAdapter:
             # The graph is up but not publishing this group; that is an
             # environment problem, not a bad request.
             raise AdapterUnavailable(
-                f"/joint_states does not cover group {self.group.name!r}: {error}"
+                f"{self.state_topic} does not cover group "
+                f"{self.group.name!r}: {error}"
             ) from error
 
     def read_pose(self, timeout_sec: float = DEFAULT_TIMEOUT_SEC) -> Pose:
@@ -301,7 +315,7 @@ class RosAdapter:
         return self._backend.now_ns()
 
     def start_recording(self) -> None:
-        """Begin keeping every ``/joint_states`` message, with its own stamp.
+        """Begin keeping every joint state message, with its own stamp.
 
         Separate from :meth:`read_state`, which discards what arrived before it
         was called so a caller never reads a pose from before the motion it just
@@ -339,7 +353,7 @@ class RosAdapter:
             stamps.append(int(stamp_ns))
         if not rows:
             raise AdapterUnavailable(
-                f"no /joint_states covering group {self.group.name!r} was "
+                f"no {self.state_topic} covering group {self.group.name!r} was "
                 f"recorded ({incomplete} message(s) arrived without it); is the "
                 "bringup running, and is the loop calling pump()?"
             )
@@ -494,7 +508,7 @@ STREAM_HORIZON_SEC = 0.0
 class _RclpyBackend:
     """The real ROS backend. Every rclpy import is confined to this class."""
 
-    def __init__(self, node_name: str):
+    def __init__(self, node_name: str, joint_topic: str = JOINT_STATES_TOPIC):
         try:
             import rclpy
             from rclpy.action import ActionClient
@@ -558,6 +572,7 @@ class _RclpyBackend:
         if self._owns_context:
             rclpy.init()
         self._node = rclpy.create_node(node_name)
+        self._joint_topic = joint_topic
         self._joint_subscription = None
         self._latest: dict[str, float] | None = None
         # None until start_recording: the same callback serves read_state, and
@@ -580,7 +595,7 @@ class _RclpyBackend:
     def joint_states(self, timeout_sec: float) -> dict[str, float]:
         if self._joint_subscription is None:
             self._joint_subscription = self._node.create_subscription(
-                self._JointState, "/joint_states", self._record, self._sensor_qos
+                self._JointState, self._joint_topic, self._record, self._sensor_qos
             )
         # Discard anything received earlier, so a caller never reads a pose
         # from before the motion it just commanded.
@@ -590,8 +605,8 @@ class _RclpyBackend:
             self._rclpy.spin_once(self._node, timeout_sec=0.05)
         if self._latest is None:
             raise AdapterUnavailable(
-                f"no /joint_states within {timeout_sec} s; is the robot bringup "
-                "running? (ros_ws/pose_bringup.sh)"
+                f"no {self._joint_topic} within {timeout_sec} s; is the robot "
+                "bringup running? (ros_ws/pose_bringup.sh)"
             )
         return dict(self._latest)
 
@@ -617,7 +632,7 @@ class _RclpyBackend:
     def start_recording(self) -> None:
         if self._joint_subscription is None:
             self._joint_subscription = self._node.create_subscription(
-                self._JointState, "/joint_states", self._record, self._sensor_qos
+                self._JointState, self._joint_topic, self._record, self._sensor_qos
             )
         self._recorded = []
 

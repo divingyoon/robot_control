@@ -63,9 +63,21 @@ def test_group_contract_marks_tesollo_groups_executable_without_moveit():
         group = profile.groups[name]
         # The DG5F hand has no IK solver configured, so it is reachable by
         # direct joint values only.
-        assert group.controller == "joint_trajectory_controller"
         assert group.moveit_group is None
         assert name in profile.executable_groups()
+        # dg5f_right_driver.launch.py runs its own controller_manager under a
+        # namespace of its own, so both the action and the state it publishes
+        # are one level down from the arm's. The plain name belongs to the
+        # Gazebo configuration, whose action server the real hand never serves.
+        assert group.controller == "dg5f_right/dg5f_right_controller"
+        assert group.state_topic == "/dg5f_right/joint_states"
+
+
+def test_groups_on_the_default_state_topic_say_so_by_leaving_it_unset():
+    groups = load_profile(PROFILE).groups
+
+    assert groups["openarm_right_arm"].state_topic is None
+    assert groups["openarm_left_arm"].state_topic is None
 
 
 

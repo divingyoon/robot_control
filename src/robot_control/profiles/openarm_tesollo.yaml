@@ -56,22 +56,37 @@ groups:
     controller: left_gripper_controller
     moveit_group: left_gripper
     action: follow_joint_trajectory
+  # The hand is not part of the arm bringup. dg5f_right_driver.launch.py brings
+  # up a controller_manager of its own under the namespace `dg5f_right`, so both
+  # the action and the joint states live one level down — and the hand's joints
+  # never appear on the robot-wide /joint_states at all. `joint_trajectory_
+  # controller`, the name these groups carried before, belongs to the Gazebo
+  # configuration; on hardware nothing serves it.
+  #
+  # The controller takes all twenty joints and allows a partial goal, which is
+  # what lets one phalanx be commanded on its own. The split is by phalanx
+  # rather than by finger because that is how hdgp groups the same joints, and
+  # a calibration measured here is exported under those names.
   tesollo_abduction:
     joints: [r_hj_thumb_1, r_hj_index_1, r_hj_middle_1, r_hj_ring_1, r_hj_pinky_1]
     hdgp_group: tesollo_hand_abduction
-    controller: joint_trajectory_controller
+    controller: dg5f_right/dg5f_right_controller
+    state_topic: /dg5f_right/joint_states
   tesollo_curl:
     joints: [r_hj_thumb_2, r_hj_index_2, r_hj_middle_2, r_hj_ring_2, r_hj_pinky_2]
     hdgp_group: tesollo_hand_curl
-    controller: joint_trajectory_controller
+    controller: dg5f_right/dg5f_right_controller
+    state_topic: /dg5f_right/joint_states
   tesollo_pip:
     joints: [r_hj_thumb_3, r_hj_index_3, r_hj_middle_3, r_hj_ring_3, r_hj_pinky_3]
     hdgp_group: tesollo_hand_pip
-    controller: joint_trajectory_controller
+    controller: dg5f_right/dg5f_right_controller
+    state_topic: /dg5f_right/joint_states
   tesollo_dip:
     joints: [r_hj_thumb_4, r_hj_index_4, r_hj_middle_4, r_hj_ring_4, r_hj_pinky_4]
     hdgp_group: tesollo_hand_dip
-    controller: joint_trajectory_controller
+    controller: dg5f_right/dg5f_right_controller
+    state_topic: /dg5f_right/joint_states
 joints:
   - {canonical: r_aj_1, source: openarm_right_joint1, sign: 1, unit: rad, lower: -1.39626, upper: 3.49066, velocity: 2.0, effort: 40}
   - {canonical: r_aj_2, source: openarm_right_joint2, sign: 1, unit: rad, lower: -0.174533, upper: 3.31612, velocity: 2.0, effort: 40}
@@ -88,23 +103,32 @@ joints:
   - {canonical: l_aj_6, source: openarm_left_joint6, sign: 1, unit: rad, lower: -0.785398, upper: 0.785398, velocity: 2.0, effort: 7}
   - {canonical: l_aj_7, source: openarm_left_joint7, sign: 1, unit: rad, lower: -1.5708, upper: 1.5708, velocity: 2.0, effort: 7}
   - {canonical: l_hj_gripper_1, source: openarm_left_finger_joint1, sign: 1, unit: rad, lower: 0.0, upper: 0.04, velocity: 0.2, effort: 20}
-  - {canonical: r_hj_thumb_1, source: rj_dg_1_1, sign: 1, unit: rad, lower: -1.5, upper: 1.5, velocity: 2.0, effort: 10}
-  - {canonical: r_hj_thumb_2, source: rj_dg_1_2, sign: 1, unit: rad, lower: -1.5, upper: 1.5, velocity: 2.0, effort: 10}
-  - {canonical: r_hj_thumb_3, source: rj_dg_1_3, sign: 1, unit: rad, lower: -1.5, upper: 1.5, velocity: 2.0, effort: 10}
-  - {canonical: r_hj_thumb_4, source: rj_dg_1_4, sign: 1, unit: rad, lower: -1.5, upper: 1.5, velocity: 2.0, effort: 10}
-  - {canonical: r_hj_index_1, source: rj_dg_2_1, sign: 1, unit: rad, lower: -1.5, upper: 1.5, velocity: 2.0, effort: 10}
-  - {canonical: r_hj_index_2, source: rj_dg_2_2, sign: 1, unit: rad, lower: -1.5, upper: 1.5, velocity: 2.0, effort: 10}
-  - {canonical: r_hj_index_3, source: rj_dg_2_3, sign: 1, unit: rad, lower: -1.5, upper: 1.5, velocity: 2.0, effort: 10}
-  - {canonical: r_hj_index_4, source: rj_dg_2_4, sign: 1, unit: rad, lower: -1.5, upper: 1.5, velocity: 2.0, effort: 10}
-  - {canonical: r_hj_middle_1, source: rj_dg_3_1, sign: 1, unit: rad, lower: -1.5, upper: 1.5, velocity: 2.0, effort: 10}
-  - {canonical: r_hj_middle_2, source: rj_dg_3_2, sign: 1, unit: rad, lower: -1.5, upper: 1.5, velocity: 2.0, effort: 10}
-  - {canonical: r_hj_middle_3, source: rj_dg_3_3, sign: 1, unit: rad, lower: -1.5, upper: 1.5, velocity: 2.0, effort: 10}
-  - {canonical: r_hj_middle_4, source: rj_dg_3_4, sign: 1, unit: rad, lower: -1.5, upper: 1.5, velocity: 2.0, effort: 10}
-  - {canonical: r_hj_ring_1, source: rj_dg_4_1, sign: 1, unit: rad, lower: -1.5, upper: 1.5, velocity: 2.0, effort: 10}
-  - {canonical: r_hj_ring_2, source: rj_dg_4_2, sign: 1, unit: rad, lower: -1.5, upper: 1.5, velocity: 2.0, effort: 10}
-  - {canonical: r_hj_ring_3, source: rj_dg_4_3, sign: 1, unit: rad, lower: -1.5, upper: 1.5, velocity: 2.0, effort: 10}
-  - {canonical: r_hj_ring_4, source: rj_dg_4_4, sign: 1, unit: rad, lower: -1.5, upper: 1.5, velocity: 2.0, effort: 10}
-  - {canonical: r_hj_pinky_1, source: rj_dg_5_1, sign: 1, unit: rad, lower: -1.5, upper: 1.5, velocity: 2.0, effort: 10}
-  - {canonical: r_hj_pinky_2, source: rj_dg_5_2, sign: 1, unit: rad, lower: -1.5, upper: 1.5, velocity: 2.0, effort: 10}
-  - {canonical: r_hj_pinky_3, source: rj_dg_5_3, sign: 1, unit: rad, lower: -1.5, upper: 1.5, velocity: 2.0, effort: 10}
-  - {canonical: r_hj_pinky_4, source: rj_dg_5_4, sign: 1, unit: rad, lower: -1.5, upper: 1.5, velocity: 2.0, effort: 10}
+  # Ranges and effort from dg_description/urdf/dg5f_right.urdf, which the asset
+  # URDF agrees with joint for joint. They are not symmetric: the thumb's second
+  # joint only travels negative and the other fingers' only positive, so the
+  # +-1.5 placeholder these carried authorized a curl command that drove four
+  # fingers into their stops. Velocity is held at the arm's conservative 2.0
+  # rather than the described 3.14, on the same reasoning as the arm.
+  - {canonical: r_hj_thumb_1, source: rj_dg_1_1, sign: 1, unit: rad, lower: -0.383972, upper: 0.890118, velocity: 2.0, effort: 7.5}
+  - {canonical: r_hj_thumb_2, source: rj_dg_1_2, sign: 1, unit: rad, lower: -3.141593, upper: 0.0, velocity: 2.0, effort: 7.5}
+  - {canonical: r_hj_thumb_3, source: rj_dg_1_3, sign: 1, unit: rad, lower: -1.570796, upper: 1.570796, velocity: 2.0, effort: 7.5}
+  - {canonical: r_hj_thumb_4, source: rj_dg_1_4, sign: 1, unit: rad, lower: -1.570796, upper: 1.570796, velocity: 2.0, effort: 7.5}
+  - {canonical: r_hj_index_1, source: rj_dg_2_1, sign: 1, unit: rad, lower: -0.418879, upper: 0.610865, velocity: 2.0, effort: 7.5}
+  - {canonical: r_hj_index_2, source: rj_dg_2_2, sign: 1, unit: rad, lower: 0.0, upper: 2.007129, velocity: 2.0, effort: 7.5}
+  - {canonical: r_hj_index_3, source: rj_dg_2_3, sign: 1, unit: rad, lower: -1.570796, upper: 1.570796, velocity: 2.0, effort: 7.5}
+  - {canonical: r_hj_index_4, source: rj_dg_2_4, sign: 1, unit: rad, lower: -1.570796, upper: 1.570796, velocity: 2.0, effort: 7.5}
+  - {canonical: r_hj_middle_1, source: rj_dg_3_1, sign: 1, unit: rad, lower: -0.610865, upper: 0.610865, velocity: 2.0, effort: 7.5}
+  - {canonical: r_hj_middle_2, source: rj_dg_3_2, sign: 1, unit: rad, lower: 0.0, upper: 1.954769, velocity: 2.0, effort: 7.5}
+  - {canonical: r_hj_middle_3, source: rj_dg_3_3, sign: 1, unit: rad, lower: -1.570796, upper: 1.570796, velocity: 2.0, effort: 7.5}
+  - {canonical: r_hj_middle_4, source: rj_dg_3_4, sign: 1, unit: rad, lower: -1.570796, upper: 1.570796, velocity: 2.0, effort: 7.5}
+  - {canonical: r_hj_ring_1, source: rj_dg_4_1, sign: 1, unit: rad, lower: -0.610865, upper: 0.418879, velocity: 2.0, effort: 7.5}
+  - {canonical: r_hj_ring_2, source: rj_dg_4_2, sign: 1, unit: rad, lower: 0.0, upper: 1.902409, velocity: 2.0, effort: 7.5}
+  - {canonical: r_hj_ring_3, source: rj_dg_4_3, sign: 1, unit: rad, lower: -1.570796, upper: 1.570796, velocity: 2.0, effort: 7.5}
+  - {canonical: r_hj_ring_4, source: rj_dg_4_4, sign: 1, unit: rad, lower: -1.570796, upper: 1.570796, velocity: 2.0, effort: 7.5}
+  # The pinky is built the other way round: joint 1 is the flexion the other
+  # fingers' joint 2 is, and joint 2 the abduction. The group names follow the
+  # other four, so tesollo_abduction moves the pinky's flexion joint.
+  - {canonical: r_hj_pinky_1, source: rj_dg_5_1, sign: 1, unit: rad, lower: -0.017453, upper: 1.047198, velocity: 2.0, effort: 7.5}
+  - {canonical: r_hj_pinky_2, source: rj_dg_5_2, sign: 1, unit: rad, lower: -0.418879, upper: 0.610865, velocity: 2.0, effort: 7.5}
+  - {canonical: r_hj_pinky_3, source: rj_dg_5_3, sign: 1, unit: rad, lower: -1.570796, upper: 1.570796, velocity: 2.0, effort: 7.5}
+  - {canonical: r_hj_pinky_4, source: rj_dg_5_4, sign: 1, unit: rad, lower: -1.570796, upper: 1.570796, velocity: 2.0, effort: 7.5}
