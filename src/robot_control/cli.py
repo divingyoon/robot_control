@@ -663,7 +663,12 @@ def _describe(group, interface, target: np.ndarray) -> None:
 
 
 def _pose_show(args, profile) -> int:
-    from .ros_adapter import AdapterUnavailable, RosAdapter, make_backend
+    from .ros_adapter import (
+        JOINT_STATES_TOPIC,
+        AdapterUnavailable,
+        RosAdapter,
+        make_backend,
+    )
 
     interface = CanonicalInterface(profile)
     groups = (
@@ -676,13 +681,21 @@ def _pose_show(args, profile) -> int:
         planning = group.moveit_group or "-"
         print(f"{name}: controller={group.controller} planning_group={planning}")
 
+    # One backend per topic, not one for the run: a hand under its own
+    # controller_manager publishes somewhere the arm's subscription will never
+    # hear, and reading it there reports a live bringup as absent.
+    backends = {}
     try:
-        backend = make_backend()
+        for index, topic in enumerate(
+            sorted({group.state_topic or JOINT_STATES_TOPIC for group in groups.values()})
+        ):
+            backends[topic] = make_backend(f"robot_control_pose_{index}", topic)
     except AdapterUnavailable as error:
         print(f"unavailable: {error}")
         return UNUSABLE
     try:
         for name, group in groups.items():
+            backend = backends[group.state_topic or JOINT_STATES_TOPIC]
             adapter = RosAdapter(profile, name, execute=False, backend=backend)
             state = adapter.read_state()
             values = " ".join(f"{value:+.4f}" for value in state)
@@ -693,7 +706,8 @@ def _pose_show(args, profile) -> int:
                 rpy = " ".join(f"{value:+.4f}" for value in pose.rpy)
                 print(f"{name}: {group.tip_link} xyz [{xyz}] rpy [{rpy}]")
     finally:
-        backend.close()
+        for backend in backends.values():
+            backend.close()
     return 0
 
 

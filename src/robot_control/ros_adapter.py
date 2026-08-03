@@ -131,13 +131,17 @@ def gripper_failure(result: Any) -> str | None:
     return "the gripper neither reached its commanded position nor stalled"
 
 
-def make_backend(node_name: str = "robot_control_pose") -> Any:
-    """Build one ROS backend, shareable by several adapters.
+def make_backend(
+    node_name: str = "robot_control_pose", joint_topic: str = JOINT_STATES_TOPIC
+) -> Any:
+    """Build one ROS backend, shareable by the adapters reading *joint_topic*.
 
     Reading every group costs one node and one rclpy context rather than one
-    per group, and each adapter created with it must not close it.
+    per group, and each adapter created with it must not close it. Sharing
+    stops at the topic: one subscription cannot serve two, so groups that
+    publish elsewhere need a backend of their own.
     """
-    return _RclpyBackend(node_name)
+    return _RclpyBackend(node_name, joint_topic)
 
 
 class RosAdapter:

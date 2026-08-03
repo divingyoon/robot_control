@@ -273,6 +273,53 @@ def test_pose_show_reports_every_executable_group_offline(capsys):
     assert "right_joint_trajectory_controller" in output
 
 
+class _TopicRecordingBackend:
+    """Records which joint topic it was built for, and reads nothing."""
+
+    def __init__(self, joint_topic):
+        self.joint_topic = joint_topic
+
+    def joint_states(self, timeout_sec):
+        return {}
+
+    def close(self):
+        pass
+
+
+@pytest.fixture
+def built_backends(monkeypatch):
+    built = []
+
+    def _make(node_name="robot_control_pose", joint_topic="/joint_states"):
+        backend = _TopicRecordingBackend(joint_topic)
+        built.append(backend)
+        return backend
+
+    monkeypatch.setattr("robot_control.ros_adapter.make_backend", _make)
+    return built
+
+
+def test_pose_show_reads_a_group_where_that_group_publishes(built_backends, capsys):
+    """A hand on its own controller_manager is not on the robot-wide topic.
+
+    Reading it there does not return a partial pose, it returns nothing at all,
+    and reports a bringup that is in fact running as absent.
+    """
+    main(["pose", "show", "--group", "tesollo_curl"])
+
+    assert [b.joint_topic for b in built_backends] == ["/dg5f_right/joint_states"]
+
+
+def test_pose_show_across_groups_reads_each_of_their_topics(built_backends, capsys):
+    """One subscription cannot serve two topics, so showing everything needs both."""
+    main(["pose", "show"])
+
+    assert set(b.joint_topic for b in built_backends) == {
+        "/joint_states",
+        "/dg5f_right/joint_states",
+    }
+
+
 class StiffArm:
     """A stub adapter whose tracking error shrinks as gravity torque is added.
 
