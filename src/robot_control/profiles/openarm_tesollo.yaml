@@ -3,7 +3,14 @@ components: [openarm, tesollo]
 asset:
   id: openarm_tesollo_sensor_rl
   manifest: ../../../../hdgp/assets/robot/openarm_tesollo_sensor_rl/openarm_tesollo_sensor_rl_manifest.yaml
-  manifest_sha256: 5f0e422ae33230592f97732448c7018ee853b40a03e689d8f884c9a3d6719798
+  # Re-pinned 2026-08-25 after hdgp `6d065f7` regenerated the robot USDs. That
+  # commit added `requires_collision_approximation` and a
+  # `self_collision_filtered_pairs` block to the manifest and changed nothing
+  # else — `control_joint_order` is byte-identical across it (35 joints, both
+  # sides, verified before re-pinning). Until this line was refreshed the hash
+  # guard refused to load the profile at all, so `robotctl` and every profile
+  # test errored out; the guard did its job, nobody had re-pinned.
+  manifest_sha256: ef802c059f1c3e57c7e652a7333c8b29c29c289bb04460414ae6e58c287244dc
   # The asset's own canonical-named URDF (r_aj_1...), whose masses include the
   # mounted hand — pass it to --urdf wherever the bringup description's vendor
   # masses are wrong for the arm as built.
@@ -102,7 +109,16 @@ joints:
   - {canonical: l_aj_5, source: openarm_left_joint5, sign: 1, unit: rad, lower: -1.5708, upper: 1.5708, velocity: 2.0, effort: 7}
   - {canonical: l_aj_6, source: openarm_left_joint6, sign: 1, unit: rad, lower: -0.785398, upper: 0.785398, velocity: 2.0, effort: 7}
   - {canonical: l_aj_7, source: openarm_left_joint7, sign: 1, unit: rad, lower: -1.5708, upper: 1.5708, velocity: 2.0, effort: 7}
-  - {canonical: l_hj_gripper_1, source: openarm_left_finger_joint1, sign: 1, unit: rad, lower: 0.0, upper: 0.04, velocity: 0.2, effort: 20}
+  # Prismatic in metres, declared `rad` because `profile.py` accepts no other
+  # unit; the numbers here are metres. The stroke is the description's own
+  # 0.044 (openarm_hand.xacro finger_joint1) — it read 0.04 until 2026-08-25,
+  # and since the bridge clamps into the profile that shortfall could only
+  # surface as a grip 4 mm narrower than the policy asked for, never as an
+  # error. Effort and velocity stay well under the rated 333 / 10.0, as the
+  # arm's do. `l_hj_gripper_2` is absent on purpose: the real URDF still mimics
+  # it off joint 1 (the sim USD is the one that lost the mimic and has to drive
+  # both jaws).
+  - {canonical: l_hj_gripper_1, source: openarm_left_finger_joint1, sign: 1, unit: rad, lower: 0.0, upper: 0.044, velocity: 0.2, effort: 20}
   # Ranges and effort from dg_description/urdf/dg5f_right.urdf, which the asset
   # URDF agrees with joint for joint. They are not symmetric: the thumb's second
   # joint only travels negative and the other fingers' only positive, so the
