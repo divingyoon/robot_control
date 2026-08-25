@@ -185,3 +185,72 @@ def test_a_commanded_move_is_slow_enough_to_be_stopped_by_hand():
         f"{DEFAULT_DURATION_SEC:g} s runs at {speed:.2f} rad/s, faster than an "
         "operator can react to"
     )
+
+
+#: The left gripper's own description. The arm's joint_limits.yaml does not
+#: mention it and the DG5F description is the wrong hand, so this joint sat
+#: outside every check above while its bound drifted 4 mm narrow of the stop.
+GRIPPER_DESCRIPTION = "ros_ws/src/openarm_description/urdf/ee/openarm_hand.xacro"
+GRIPPER_GROUP = "openarm_left_gripper"
+
+
+@pytest.fixture(scope="module")
+def described_gripper():
+    """The finger joint's limit, read from the xacro macro that defines it.
+
+    The macro parameterises the joint name by an ``${ee_prefix}``, so the
+    element is matched on the suffix rather than on a resolved name.
+    """
+    path = repository_root() / GRIPPER_DESCRIPTION
+    if not path.is_file():
+        pytest.skip(f"vendored hand description not found: {path}")
+    root = ElementTree.parse(path).getroot()
+    for joint in root.iter("joint"):
+        name = joint.get("name") or ""
+        if name.endswith("finger_joint1") and joint.find("limit") is not None:
+            return joint.find("limit")
+    pytest.skip(f"{GRIPPER_DESCRIPTION} declares no finger_joint1 limit")
+
+
+def _gripper_joints(profile):
+    by_canonical = {joint.canonical: joint for joint in profile.joints}
+    for canonical in profile.groups[GRIPPER_GROUP].joints:
+        yield by_canonical[canonical]
+
+
+def test_the_gripper_opens_as_far_as_its_stop_allows(profile, described_gripper):
+    """A narrow bound truncates the stroke silently.
+
+    The bridge clamps every command into the profile, so a bound short of the
+    stop does not raise — it just delivers a narrower grip than the policy
+    asked for, and the deficit shows up as a grasp that never closes on the
+    object rather than as an error anyone can read.
+    """
+    lower = float(described_gripper.get("lower"))
+    upper = float(described_gripper.get("upper"))
+
+    for joint in _gripper_joints(profile):
+        assert (joint.lower, joint.upper) == pytest.approx(
+            (lower, upper), abs=1e-6
+        ), (
+            f"{joint.canonical} is bounded [{joint.lower:.4f}, {joint.upper:.4f}] "
+            f"against the description's [{lower:.4f}, {upper:.4f}]; a bound "
+            "short of the stop truncates the stroke without reporting it"
+        )
+
+
+def test_the_gripper_is_not_driven_past_what_the_hardware_is_rated_for(
+    profile, described_gripper
+):
+    rated_effort = float(described_gripper.get("effort"))
+    rated_velocity = float(described_gripper.get("velocity"))
+
+    for joint in _gripper_joints(profile):
+        assert joint.effort <= rated_effort, (
+            f"{joint.canonical} authorizes {joint.effort:g} against a rated "
+            f"{rated_effort:g}"
+        )
+        assert joint.velocity <= rated_velocity, (
+            f"{joint.canonical} allows {joint.velocity:g} against a rated "
+            f"{rated_velocity:g}"
+        )

@@ -122,19 +122,11 @@ def test_an_unmeasured_group_keeps_the_envs_own_gain(hdgp_loader, exported):
     assert params == {"stiffness": 30.0, "damping": 5.0}
 
 
-def test_the_name_we_export_under_is_the_name_hdgps_env_declares(hdgp_loader):
-    """The mapping's other half: what hdgp's env_cfg actually calls its groups.
-
-    hdgp resolves an unknown group to the default silently, so a rename there
-    would otherwise surface as a training run that ignored the calibration.
-    """
+def _declared_actuator_groups(env_cfg):
+    """The `ImplicitActuatorCfg` dict keys one hdgp env_cfg declares."""
     import ast
 
-    root = _hdgp_root()
-    env_cfg = root / LOADER.parent / "grasp_right_env_cfg.py"
-    if not env_cfg.is_file():
-        pytest.skip(f"env_cfg not found: {env_cfg}")
-    declared = {
+    return {
         ast.literal_eval(key)
         for node in ast.walk(ast.parse(env_cfg.read_text()))
         if isinstance(node, ast.Dict)
@@ -144,8 +136,40 @@ def test_the_name_we_export_under_is_the_name_hdgps_env_declares(hdgp_loader):
         and isinstance(value.func, ast.Name)
         and value.func.id == "ImplicitActuatorCfg"
     }
+
+
+def test_the_name_we_export_under_is_a_name_some_hdgp_env_declares(hdgp_loader):
+    """The mapping's other half: what hdgp's env_cfgs actually call their groups.
+
+    hdgp resolves an unknown group to the default silently, so a rename there
+    would otherwise surface as a training run that ignored the calibration.
+
+    Across every env_cfg rather than one of them. The profile describes the
+    whole robot, but each task actuates only the part it uses — a right-arm
+    task declares no left gripper, and reading a single file made this fail for
+    the profile being complete rather than for anything being wrong.
+
+    A caveat this does not catch, recorded because it is the very fallback the
+    exporter exists to prevent: `gripper/left/grasp_sensor` names its groups
+    `left_arm` / `left_gripper`, not the `openarm_left_arm` /
+    `openarm_left_gripper` we export under. Injecting a calibration into that
+    task would land on the env's own defaults without a word. Widening the
+    check to the union is what lets some other task's spelling satisfy this,
+    so the per-task question stays open.
+    """
+    root = _hdgp_root()
+    env_cfgs = sorted((root / "source/openarm/openarm").rglob("*_env_cfg.py"))
+    if not env_cfgs:
+        pytest.skip(f"no hdgp env_cfg files under {root}")
+
+    declared = set()
+    for env_cfg in env_cfgs:
+        try:
+            declared |= _declared_actuator_groups(env_cfg)
+        except SyntaxError:
+            continue
     if not declared:
-        pytest.skip("no ImplicitActuatorCfg groups parsed from env_cfg")
+        pytest.skip("no ImplicitActuatorCfg groups parsed from any env_cfg")
 
     profile = load_builtin_profile("openarm_tesollo")
     exported_names = {
