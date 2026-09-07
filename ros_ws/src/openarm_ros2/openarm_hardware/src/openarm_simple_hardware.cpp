@@ -170,6 +170,8 @@ hardware_interface::CallbackReturn OpenArmHW::on_init(
   pos_states_.resize(total_joints, 0.0);
   vel_states_.resize(total_joints, 0.0);
   tau_states_.resize(total_joints, 0.0);
+  temp_rotor_states_.resize(total_joints, 0.0);
+  temp_mos_states_.resize(total_joints, 0.0);
 
   RCLCPP_INFO(rclcpp::get_logger("OpenArmHW"),
               "OpenArm V10 Simple HW initialized successfully");
@@ -197,6 +199,10 @@ OpenArmHW::export_state_interfaces() {
         joint_names_[i], hardware_interface::HW_IF_VELOCITY, &vel_states_[i]));
     state_interfaces.emplace_back(hardware_interface::StateInterface(
         joint_names_[i], hardware_interface::HW_IF_EFFORT, &tau_states_[i]));
+    state_interfaces.emplace_back(hardware_interface::StateInterface(
+        joint_names_[i], "temperature_rotor", &temp_rotor_states_[i]));
+    state_interfaces.emplace_back(hardware_interface::StateInterface(
+        joint_names_[i], "temperature_mos", &temp_mos_states_[i]));
   }
 
   return state_interfaces;
@@ -262,6 +268,9 @@ hardware_interface::return_type OpenArmHW::read(
     pos_states_[i] = arm_motors[i].get_position();
     vel_states_[i] = arm_motors[i].get_velocity();
     tau_states_[i] = arm_motors[i].get_torque();
+    temp_rotor_states_[i] =
+        static_cast<double>(arm_motors[i].get_state_trotor());
+    temp_mos_states_[i] = static_cast<double>(arm_motors[i].get_state_tmos());
   }
 
   // Read gripper state if enabled
@@ -276,6 +285,11 @@ hardware_interface::return_type OpenArmHW::read(
       // Unimplemented: Velocity and torque mapping
       vel_states_[ARM_DOF] = 0;  // gripper_motors[0].get_velocity();
       tau_states_[ARM_DOF] = 0;  // gripper_motors[0].get_torque();
+
+      temp_rotor_states_[ARM_DOF] =
+          static_cast<double>(gripper_motors[0].get_state_trotor());
+      temp_mos_states_[ARM_DOF] =
+          static_cast<double>(gripper_motors[0].get_state_tmos());
     }
   }
 

@@ -134,6 +134,11 @@ class OpenArmHW : public hardware_interface::SystemInterface {
   std::vector<double> pos_states_;
   std::vector<double> vel_states_;
   std::vector<double> tau_states_;
+  // Motor thermistors, decoded from every MIT feedback frame (degrees C).
+  // The DM motors have always reported these; they were simply never exported,
+  // so the thermal guard upstream had to infer heat from torque x time.
+  std::vector<double> temp_rotor_states_;
+  std::vector<double> temp_mos_states_;
 
   static constexpr std::array<double, ARM_DOF> ZERO_POSITION = {
       0.0,  // joint1
