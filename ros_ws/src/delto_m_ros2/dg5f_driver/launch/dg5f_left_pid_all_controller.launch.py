@@ -74,6 +74,15 @@ def generate_launch_description():
 
     declared_arguments.append(
         DeclareLaunchArgument(
+            "ft_broadcaster",
+            default_value="false",
+            description="Enable F/T sensor broadcaster (force/torque only, not tactile)"
+        )
+    )
+    ft_broadcaster = LaunchConfiguration("ft_broadcaster")
+
+    declared_arguments.append(
+        DeclareLaunchArgument(
             "io",
             default_value="false",
             description="Enable IO interface"
@@ -127,7 +136,7 @@ def generate_launch_description():
             ("~/robot_description", "/" + ns + "/robot_description"),
         ],
         output="screen",
-        condition=UnlessCondition(fingertip_sensor),
+        condition=UnlessCondition(ft_broadcaster),
     )
 
     # ROS2 Control Node with FT Broadcaster (conditional)
@@ -140,7 +149,7 @@ def generate_launch_description():
             ("~/robot_description", "/" + ns + "/robot_description"),
         ],
         output="screen",
-        condition=IfCondition(fingertip_sensor),
+        condition=IfCondition(ft_broadcaster),
     )
 
     # Robot State Publisher
@@ -179,7 +188,7 @@ def generate_launch_description():
         arguments=["fingertip_1_broadcaster",
                    "-c", "/" + ns + "/controller_manager"],
         output="screen",
-        condition=IfCondition(fingertip_sensor),
+        condition=IfCondition(ft_broadcaster),
     )
 
     fingertip_2_broadcaster_spawner = Node(
@@ -188,7 +197,7 @@ def generate_launch_description():
         arguments=["fingertip_2_broadcaster",
                    "-c", "/" + ns + "/controller_manager"],
         output="screen",
-        condition=IfCondition(fingertip_sensor),
+        condition=IfCondition(ft_broadcaster),
     )
 
     fingertip_3_broadcaster_spawner = Node(
@@ -197,7 +206,7 @@ def generate_launch_description():
         arguments=["fingertip_3_broadcaster",
                    "-c", "/" + ns + "/controller_manager"],
         output="screen",
-        condition=IfCondition(fingertip_sensor),
+        condition=IfCondition(ft_broadcaster),
     )
 
     fingertip_4_broadcaster_spawner = Node(
@@ -206,7 +215,7 @@ def generate_launch_description():
         arguments=["fingertip_4_broadcaster",
                    "-c", "/" + ns + "/controller_manager"],
         output="screen",
-        condition=IfCondition(fingertip_sensor),
+        condition=IfCondition(ft_broadcaster),
     )
 
     fingertip_5_broadcaster_spawner = Node(
@@ -215,7 +224,7 @@ def generate_launch_description():
         arguments=["fingertip_5_broadcaster",
                    "-c", "/" + ns + "/controller_manager"],
         output="screen",
-        condition=IfCondition(fingertip_sensor),
+        condition=IfCondition(ft_broadcaster),
     )
 
     # List all nodes to start
