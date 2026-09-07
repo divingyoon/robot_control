@@ -86,6 +86,14 @@ def generate_launch_description():
 
     declared_arguments.append(
         DeclareLaunchArgument(
+            "ft_broadcaster",
+            default_value="false",
+            description="Enable F/T sensor broadcaster (force/torque only, not tactile)"
+        )
+    )
+
+    declared_arguments.append(
+        DeclareLaunchArgument(
             "io",
             default_value="false",
             description="Enable IO interface"
@@ -99,6 +107,7 @@ def generate_launch_description():
     dg5f_left_ip = LaunchConfiguration("dg5f_left_ip")
     dg5f_left_port = LaunchConfiguration("dg5f_left_port")
     fingertip_sensor = LaunchConfiguration("fingertip_sensor")
+    ft_broadcaster = LaunchConfiguration("ft_broadcaster")
     io = LaunchConfiguration("io")
 
     # Get paths to config files
@@ -153,7 +162,7 @@ def generate_launch_description():
             ("~/robot_description", "/" + ns + "/robot_description"),
         ],
         output="screen",
-        condition=UnlessCondition(fingertip_sensor),
+        condition=UnlessCondition(ft_broadcaster),
     )
 
     # ROS2 Control Node with FT Broadcaster (conditional)
@@ -166,7 +175,7 @@ def generate_launch_description():
             ("~/robot_description", "/" + ns + "/robot_description"),
         ],
         output="screen",
-        condition=IfCondition(fingertip_sensor),
+        condition=IfCondition(ft_broadcaster),
     )
 
     # Robot State Publisher
@@ -208,35 +217,35 @@ def generate_launch_description():
         executable="spawner",
         arguments=["right_fingertip_1_broadcaster", "-c", "/" + ns + "/controller_manager"],
         output="screen",
-        condition=IfCondition(fingertip_sensor),
+        condition=IfCondition(ft_broadcaster),
     )
     right_fingertip_2_broadcaster_spawner = Node(
         package="controller_manager",
         executable="spawner",
         arguments=["right_fingertip_2_broadcaster", "-c", "/" + ns + "/controller_manager"],
         output="screen",
-        condition=IfCondition(fingertip_sensor),
+        condition=IfCondition(ft_broadcaster),
     )
     right_fingertip_3_broadcaster_spawner = Node(
         package="controller_manager",
         executable="spawner",
         arguments=["right_fingertip_3_broadcaster", "-c", "/" + ns + "/controller_manager"],
         output="screen",
-        condition=IfCondition(fingertip_sensor),
+        condition=IfCondition(ft_broadcaster),
     )
     right_fingertip_4_broadcaster_spawner = Node(
         package="controller_manager",
         executable="spawner",
         arguments=["right_fingertip_4_broadcaster", "-c", "/" + ns + "/controller_manager"],
         output="screen",
-        condition=IfCondition(fingertip_sensor),
+        condition=IfCondition(ft_broadcaster),
     )
     right_fingertip_5_broadcaster_spawner = Node(
         package="controller_manager",
         executable="spawner",
         arguments=["right_fingertip_5_broadcaster", "-c", "/" + ns + "/controller_manager"],
         output="screen",
-        condition=IfCondition(fingertip_sensor),
+        condition=IfCondition(ft_broadcaster),
     )
 
     # Left hand fingertip sensor broadcasters (conditionally loaded)
@@ -245,35 +254,35 @@ def generate_launch_description():
         executable="spawner",
         arguments=["left_fingertip_1_broadcaster", "-c", "/" + ns + "/controller_manager"],
         output="screen",
-        condition=IfCondition(fingertip_sensor),
+        condition=IfCondition(ft_broadcaster),
     )
     left_fingertip_2_broadcaster_spawner = Node(
         package="controller_manager",
         executable="spawner",
         arguments=["left_fingertip_2_broadcaster", "-c", "/" + ns + "/controller_manager"],
         output="screen",
-        condition=IfCondition(fingertip_sensor),
+        condition=IfCondition(ft_broadcaster),
     )
     left_fingertip_3_broadcaster_spawner = Node(
         package="controller_manager",
         executable="spawner",
         arguments=["left_fingertip_3_broadcaster", "-c", "/" + ns + "/controller_manager"],
         output="screen",
-        condition=IfCondition(fingertip_sensor),
+        condition=IfCondition(ft_broadcaster),
     )
     left_fingertip_4_broadcaster_spawner = Node(
         package="controller_manager",
         executable="spawner",
         arguments=["left_fingertip_4_broadcaster", "-c", "/" + ns + "/controller_manager"],
         output="screen",
-        condition=IfCondition(fingertip_sensor),
+        condition=IfCondition(ft_broadcaster),
     )
     left_fingertip_5_broadcaster_spawner = Node(
         package="controller_manager",
         executable="spawner",
         arguments=["left_fingertip_5_broadcaster", "-c", "/" + ns + "/controller_manager"],
         output="screen",
-        condition=IfCondition(fingertip_sensor),
+        condition=IfCondition(ft_broadcaster),
     )
 
     # List all nodes to start

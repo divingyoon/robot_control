@@ -28,6 +28,18 @@
 
 #include "delto_tcp_comm/delto_developer_TCP.hpp"
 
+#include <sys/socket.h>
+#include <netinet/in.h>
+#include <netinet/tcp.h>
+#include <arpa/inet.h>
+#include <unistd.h>
+#include <poll.h>
+#include <fcntl.h>
+#include <cerrno>
+#include <cstring>
+#include <chrono>
+#include <stdexcept>
+
 namespace DeltoTCP {
 
 // ============================================================================
@@ -36,6 +48,10 @@ namespace DeltoTCP {
 
 int Communication::GetMotorCount(uint16_t model) {
   switch (model) {
+    case static_cast<uint16_t>(ModelType::DG1F):
+      return 3;
+    case static_cast<uint16_t>(ModelType::DG2F):
+      return 6;
     case static_cast<uint16_t>(ModelType::DG3F_B):
     case static_cast<uint16_t>(ModelType::DG3F_M):
       return 12;
@@ -44,7 +60,12 @@ int Communication::GetMotorCount(uint16_t model) {
     case static_cast<uint16_t>(ModelType::DG5F):
     case static_cast<uint16_t>(ModelType::DG5F_L):
     case static_cast<uint16_t>(ModelType::DG5F_R):
+    case static_cast<uint16_t>(ModelType::DG5F_L_S):
+    case static_cast<uint16_t>(ModelType::DG5F_R_S):
       return 20;
+    case static_cast<uint16_t>(ModelType::DG5F_L_S15):
+    case static_cast<uint16_t>(ModelType::DG5F_R_S15):
+      return 15;
     default:
       std::cerr << "Unknown model type: 0x" << std::hex << model << std::dec
                 << std::endl;
@@ -53,19 +74,18 @@ int Communication::GetMotorCount(uint16_t model) {
 }
 
 int Communication::GetBytePerMotor(uint16_t model) {
-  // DG3F-B (구형): 5 bytes per motor
-  // ID(1) + PosL(1) + PosH(1) + CurL(1) + CurH(1)
   if (model == static_cast<uint16_t>(ModelType::DG3F_B)) {
     return 5;
   }
-
-  // 신형 모델들: 8 bytes per motor
-  // ID(1) + PosL(1) + PosH(1) + CurL(1) + CurH(1) + TempL(1) + TempH(1) + Vel(1)
   return 8;
 }
 
 int Communication::GetFingerCount(uint16_t model) {
   switch (model) {
+    case static_cast<uint16_t>(ModelType::DG1F):
+      return 1;
+    case static_cast<uint16_t>(ModelType::DG2F):
+      return 2;
     case static_cast<uint16_t>(ModelType::DG3F_B):
     case static_cast<uint16_t>(ModelType::DG3F_M):
       return 3;
@@ -74,6 +94,10 @@ int Communication::GetFingerCount(uint16_t model) {
     case static_cast<uint16_t>(ModelType::DG5F):
     case static_cast<uint16_t>(ModelType::DG5F_L):
     case static_cast<uint16_t>(ModelType::DG5F_R):
+    case static_cast<uint16_t>(ModelType::DG5F_L_S):
+    case static_cast<uint16_t>(ModelType::DG5F_R_S):
+    case static_cast<uint16_t>(ModelType::DG5F_L_S15):
+    case static_cast<uint16_t>(ModelType::DG5F_R_S15):
       return 5;
     default:
       return 5;
@@ -85,20 +109,31 @@ bool Communication::IsNewModel() const {
 }
 
 bool Communication::SupportsExtendedFeatures() const {
-  // New models (DG3F-M, DG4F, DG5F) support extended features
-  return model_ == static_cast<uint16_t>(ModelType::DG3F_M) ||
-         model_ == static_cast<uint16_t>(ModelType::DG4F) ||
-         model_ == static_cast<uint16_t>(ModelType::DG5F) ||
-         model_ == static_cast<uint16_t>(ModelType::DG5F_L) ||
-         model_ == static_cast<uint16_t>(ModelType::DG5F_R);
+  return model_ != static_cast<uint16_t>(ModelType::DG3F_B);
 }
 
-int16_t Communication::CalculateExpectedResponseLength() {
-  int16_t length = HEADER_SIZE + motor_count_ * byte_per_motor_;
+int Communication::GetSensorBytesPerFinger() const {
+  switch (sensor_type_) {
+    case SensorType::FT_6AXIS:  return 12;
+    case SensorType::FT_3AXIS:  return 12;
+    case SensorType::FT_4AXIS:  return 12;
+    case SensorType::TACTILE_M: return 15;
+    case SensorType::TACTILE_S: return 36;
+    default:                    return 0;
+  }
+}
+
+int Communication::GetSensorFingerCount() const {
+  return finger_count_;
+}
+
+int Communication::CalculateExpectedResponseLength() {
+  int length = static_cast<int>(HEADER_SIZE) + motor_count_ * byte_per_motor_;
 
   if (SupportsExtendedFeatures()) {
-    if (fingertip_sensor_) {
-      length += 2 * 6 * finger_count_;  // 2 bytes × 6 axes × N fingers
+    if (fingertip_sensor_ && sensor_type_ != SensorType::NONE) {
+      int sensor_fingers = GetSensorFingerCount();
+      length += GetSensorBytesPerFinger() * sensor_fingers;
     }
     if (io_) {
       length += GPIO_SIZE;
@@ -109,7 +144,6 @@ int16_t Communication::CalculateExpectedResponseLength() {
 }
 
 int16_t Communication::CombineMsg(uint8_t data1, uint8_t data2) {
-  // Big Endian: data1 = high byte, data2 = low byte
   return static_cast<int16_t>(static_cast<uint16_t>(data1 << 8) | data2);
 }
 
@@ -118,6 +152,135 @@ int8_t Communication::ConvertByte(uint8_t byte) {
     return static_cast<int8_t>(byte - 0x100);
   }
   return static_cast<int8_t>(byte);
+}
+
+// ============================================================================
+// Low-level I/O
+// ============================================================================
+
+bool Communication::SendAll(const uint8_t* data, std::size_t len,
+                            int timeout_ms) {
+  if (sockfd_ < 0) {
+    return false;
+  }
+
+  std::size_t sent = 0;
+  auto deadline = std::chrono::steady_clock::now() +
+                  std::chrono::milliseconds(timeout_ms);
+
+  while (sent < len) {
+    // Bounded wait for writability so a full send buffer cannot block forever.
+    int remaining_ms = static_cast<int>(
+        std::chrono::duration_cast<std::chrono::milliseconds>(
+            deadline - std::chrono::steady_clock::now()).count());
+    if (remaining_ms <= 0) {
+      std::cerr << "Send timeout: sent " << sent << "/" << len << " bytes"
+                << std::endl;
+      return false;
+    }
+
+    struct pollfd pfd;
+    pfd.fd = sockfd_;
+    pfd.events = POLLOUT;
+
+    int ret = ::poll(&pfd, 1, remaining_ms);
+    if (ret < 0) {
+      if (errno == EINTR) continue;
+      std::cerr << "Send poll error: " << std::strerror(errno) << std::endl;
+      return false;
+    }
+    if (ret == 0) {
+      std::cerr << "Send timeout: sent " << sent << "/" << len << " bytes"
+                << std::endl;
+      return false;
+    }
+    if (pfd.revents & (POLLERR | POLLHUP | POLLNVAL)) {
+      std::cerr << "Socket error during send poll" << std::endl;
+      return false;
+    }
+
+    ssize_t n = ::send(sockfd_, data + sent, len - sent, MSG_NOSIGNAL);
+    if (n < 0) {
+      if (errno == EINTR || errno == EAGAIN || errno == EWOULDBLOCK) continue;
+      std::cerr << "Send error: " << std::strerror(errno) << std::endl;
+      return false;
+    }
+    if (n == 0) {
+      std::cerr << "Send error: connection closed" << std::endl;
+      return false;
+    }
+    sent += static_cast<std::size_t>(n);
+  }
+  return true;
+}
+
+void Communication::DrainSocket() {
+  if (sockfd_ < 0) {
+    return;
+  }
+
+  uint8_t scratch[256];
+  std::size_t dropped = 0;
+  while (true) {
+    ssize_t n = ::recv(sockfd_, scratch, sizeof(scratch), MSG_DONTWAIT);
+    if (n <= 0) {
+      break;  // EAGAIN (empty), EOF, or error -- nothing more to discard
+    }
+    dropped += static_cast<std::size_t>(n);
+    if (dropped > 64 * 1024) {
+      break;  // pathological flood: stop draining rather than spin
+    }
+  }
+
+  if (dropped > 0) {
+    std::cerr << "Dropped " << dropped
+              << " stale bytes before request (stream was desynced)"
+              << std::endl;
+  }
+}
+
+bool Communication::RecvAll(uint8_t* data, std::size_t len, int timeout_ms) {
+  std::size_t received = 0;
+  auto deadline = std::chrono::steady_clock::now() +
+                  std::chrono::milliseconds(timeout_ms);
+
+  while (received < len) {
+    int remaining_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+        deadline - std::chrono::steady_clock::now()).count();
+    if (remaining_ms <= 0) {
+      std::cerr << "Read timeout: got " << received << "/" << len
+                << " bytes" << std::endl;
+      return false;
+    }
+
+    struct pollfd pfd;
+    pfd.fd = sockfd_;
+    pfd.events = POLLIN;
+
+    int ret = ::poll(&pfd, 1, remaining_ms);
+    if (ret < 0) {
+      std::cerr << "Poll error: " << std::strerror(errno) << std::endl;
+      return false;
+    }
+    if (ret == 0) {
+      std::cerr << "Read timeout: got " << received << "/" << len
+                << " bytes" << std::endl;
+      return false;
+    }
+    if (pfd.revents & (POLLERR | POLLHUP | POLLNVAL)) {
+      std::cerr << "Socket error during poll" << std::endl;
+      return false;
+    }
+
+    ssize_t n = ::recv(sockfd_, data + received, len - received, 0);
+    if (n <= 0) {
+      std::cerr << "Read error: " << (n == 0 ? "Connection closed" :
+                    std::strerror(errno)) << std::endl;
+      return false;
+    }
+    received += static_cast<std::size_t>(n);
+  }
+  return true;
 }
 
 // ============================================================================
@@ -132,14 +295,24 @@ Communication::Communication(const std::string& ip, int port, uint16_t model,
       actual_model_(0),
       fingertip_sensor_(fingertip_sensor),
       io_(io),
-      socket_(io_context_),
+      sensor_type_(SensorType::NONE),
+      finger_sensor_mask_(0),
+      sockfd_(-1),
       motor_count_(GetMotorCount(model)),
       byte_per_motor_(GetBytePerMotor(model)),
       finger_count_(GetFingerCount(model)),
-      expected_response_length_(CalculateExpectedResponseLength()) {}
+      expected_response_length_(0) {}
+
+Communication::~Communication() {
+  Disconnect();
+}
 
 std::string Communication::ModelToString(uint16_t model) {
   switch (model) {
+    case static_cast<uint16_t>(ModelType::DG1F):
+      return "DG1F (0x1F02)";
+    case static_cast<uint16_t>(ModelType::DG2F):
+      return "DG2F-M (0x2F02)";
     case static_cast<uint16_t>(ModelType::DG3F_B):
       return "DG3F-B (0x3F01)";
     case static_cast<uint16_t>(ModelType::DG3F_M):
@@ -152,8 +325,16 @@ std::string Communication::ModelToString(uint16_t model) {
       return "DG5F-L (0x5F12)";
     case static_cast<uint16_t>(ModelType::DG5F_R):
       return "DG5F-R (0x5F22)";
+    case static_cast<uint16_t>(ModelType::DG5F_L_S):
+      return "DG5F-L-S (0x5F14)";
+    case static_cast<uint16_t>(ModelType::DG5F_R_S):
+      return "DG5F-R-S (0x5F24)";
+    case static_cast<uint16_t>(ModelType::DG5F_L_S15):
+      return "DG5F-L-S15 (0x5F34)";
+    case static_cast<uint16_t>(ModelType::DG5F_R_S15):
+      return "DG5F-R-S15 (0x5F44)";
     default:
-      return "Unknown (0x" + 
+      return "Unknown (0x" +
              ([](uint16_t v) {
                char buf[8];
                snprintf(buf, sizeof(buf), "%04X", v);
@@ -162,62 +343,156 @@ std::string Communication::ModelToString(uint16_t model) {
   }
 }
 
-Communication::~Communication() {
-  if (socket_.is_open()) {
-    socket_.close();
-  }
-}
-
 // ============================================================================
 // Connection Management
 // ============================================================================
 
 void Communication::Connect() {
-  tcp::resolver resolver(io_context_);
-  boost::system::error_code ec;
+  // Close existing socket
+  Disconnect();
 
-  // Ensure socket is closed before attempting to connect
-  if (socket_.is_open()) {
-    socket_.close();
+  sockfd_ = ::socket(AF_INET, SOCK_STREAM, 0);
+  if (sockfd_ < 0) {
+    throw std::runtime_error("Failed to create socket: " +
+                             std::string(std::strerror(errno)));
   }
 
-  boost::asio::connect(socket_, resolver.resolve(ip_, std::to_string(port_)),
-                       ec);
-
-  if (ec) {
-    std::cerr << "Could not connect: " << ec.message() << std::endl;
-    throw std::runtime_error("Connection failed: " + ec.message());
+  struct sockaddr_in addr;
+  std::memset(&addr, 0, sizeof(addr));
+  addr.sin_family = AF_INET;
+  addr.sin_port = htons(static_cast<uint16_t>(port_));
+  if (::inet_pton(AF_INET, ip_.c_str(), &addr.sin_addr) <= 0) {
+    ::close(sockfd_);
+    sockfd_ = -1;
+    throw std::runtime_error("Invalid IP address: " + ip_);
   }
 
-  // Get firmware version and model info (single request)
-  // Response format: Length(2) + CMD(1) + Model(2) + Version(2) = 7 bytes
+  // Non-blocking connect with an explicit timeout: a blocking ::connect() to an
+  // unreachable host sits in the kernel SYN retry for ~2 minutes.
   {
-    std::array<uint8_t, 3> request;
-    request[0] = 0x00;              // Length_h
-    request[1] = 0x03;              // Length_l
-    request[2] = GET_VERSION_CMD;   // CMD
+    constexpr int CONNECT_TIMEOUT_MS = 3000;
 
-    socket_.write_some(boost::asio::buffer(request), ec);
-    if (ec) {
-      std::cerr << "Error sending version request: " << ec.message()
-                << std::endl;
-      throw std::runtime_error("Failed to get device info: " + ec.message());
+    int flags = ::fcntl(sockfd_, F_GETFL, 0);
+    if (flags < 0 || ::fcntl(sockfd_, F_SETFL, flags | O_NONBLOCK) < 0) {
+      ::close(sockfd_);
+      sockfd_ = -1;
+      throw std::runtime_error("Failed to set socket non-blocking: " +
+                               std::string(std::strerror(errno)));
     }
 
-    std::vector<uint8_t> response(7);
-    boost::asio::read(socket_, boost::asio::buffer(response),
-                      boost::asio::transfer_exactly(7), ec);
-    if (ec) {
-      std::cerr << "Error reading version response: " << ec.message()
-                << std::endl;
-      throw std::runtime_error("Failed to read device info: " + ec.message());
+    int rc = ::connect(sockfd_, reinterpret_cast<struct sockaddr*>(&addr),
+                       sizeof(addr));
+    if (rc < 0 && errno != EINPROGRESS) {
+      int saved = errno;
+      ::close(sockfd_);
+      sockfd_ = -1;
+      throw std::runtime_error("Connection failed to " + ip_ + ":" +
+                               std::to_string(port_) + ": " +
+                               std::strerror(saved));
     }
 
-    // Parse model ID (bytes 3-4, Big Endian)
-    actual_model_ = CombineMsg(response[3], response[4]);
+    if (rc < 0) {
+      struct pollfd pfd;
+      pfd.fd = sockfd_;
+      pfd.events = POLLOUT;
 
-    // Parse firmware version (bytes 5-6)
-    firmware_version_ = {response[5], response[6]};
+      int pret = ::poll(&pfd, 1, CONNECT_TIMEOUT_MS);
+      if (pret <= 0) {
+        ::close(sockfd_);
+        sockfd_ = -1;
+        throw std::runtime_error(
+            "Connection to " + ip_ + ":" + std::to_string(port_) +
+            (pret == 0 ? " timed out after " +
+                             std::to_string(CONNECT_TIMEOUT_MS) + " ms"
+                       : std::string(" failed in poll: ") +
+                             std::strerror(errno)));
+      }
+
+      int soerr = 0;
+      socklen_t soerr_len = sizeof(soerr);
+      if (::getsockopt(sockfd_, SOL_SOCKET, SO_ERROR, &soerr, &soerr_len) < 0 ||
+          soerr != 0) {
+        int saved = (soerr != 0) ? soerr : errno;
+        ::close(sockfd_);
+        sockfd_ = -1;
+        throw std::runtime_error("Connection failed to " + ip_ + ":" +
+                                 std::to_string(port_) + ": " +
+                                 std::strerror(saved));
+      }
+    }
+
+    // Back to blocking mode; SendAll/RecvAll poll for readiness themselves.
+    if (::fcntl(sockfd_, F_SETFL, flags) < 0) {
+      ::close(sockfd_);
+      sockfd_ = -1;
+      throw std::runtime_error("Failed to restore socket flags: " +
+                               std::string(std::strerror(errno)));
+    }
+  }
+
+  // TCP keepalive for cable-disconnect detection
+  int keepalive = 1;
+  setsockopt(sockfd_, SOL_SOCKET, SO_KEEPALIVE, &keepalive, sizeof(keepalive));
+  int keepidle = 1;
+  int keepintvl = 1;
+  int keepcnt = 3;
+  setsockopt(sockfd_, IPPROTO_TCP, TCP_KEEPIDLE, &keepidle, sizeof(keepidle));
+  setsockopt(sockfd_, IPPROTO_TCP, TCP_KEEPINTVL, &keepintvl, sizeof(keepintvl));
+  setsockopt(sockfd_, IPPROTO_TCP, TCP_KEEPCNT, &keepcnt, sizeof(keepcnt));
+
+  // Disable Nagle's algorithm for low-latency
+  int nodelay = 1;
+  setsockopt(sockfd_, IPPROTO_TCP, TCP_NODELAY, &nodelay, sizeof(nodelay));
+
+  // Get firmware version and model info
+  {
+    uint8_t request[3] = {0x00, 0x03, GET_VERSION_CMD};
+    if (!SendAll(request, 3)) {
+      Disconnect();
+      throw std::runtime_error("Failed to send version request");
+    }
+
+    // Read length field (2 bytes)
+    uint8_t len_buf[2];
+    if (!RecvAll(len_buf, 2, 3000)) {
+      Disconnect();
+      throw std::runtime_error("Failed to read device info");
+    }
+
+    uint16_t resp_length = (static_cast<uint16_t>(len_buf[0]) << 8) | len_buf[1];
+
+    // Validate before subtracting: length 0 would underflow to 65534, and
+    // any length below 7 leaves the model/firmware reads below out of bounds.
+    constexpr uint16_t MIN_VERSION_RESP_LENGTH = 7;
+    constexpr uint16_t MAX_VERSION_RESP_LENGTH = 64;
+    if (resp_length < MIN_VERSION_RESP_LENGTH ||
+        resp_length > MAX_VERSION_RESP_LENGTH) {
+      Disconnect();
+      throw std::runtime_error(
+          "Invalid device info length: " + std::to_string(resp_length) +
+          " (expected " + std::to_string(MIN_VERSION_RESP_LENGTH) + ".." +
+          std::to_string(MAX_VERSION_RESP_LENGTH) + ")");
+    }
+
+    uint16_t remaining = static_cast<uint16_t>(resp_length - 2);
+
+    std::vector<uint8_t> payload(remaining);
+    if (!RecvAll(payload.data(), remaining, 3000)) {
+      Disconnect();
+      throw std::runtime_error("Failed to read device info payload");
+    }
+
+    actual_model_ = CombineMsg(payload[1], payload[2]);
+    firmware_version_ = {payload[3], payload[4]};
+
+    if (resp_length >= 9) {
+      sensor_type_ = static_cast<SensorType>(payload[5]);
+      finger_sensor_mask_ = payload[6];
+    } else {
+      sensor_type_ = fingertip_sensor_ ? SensorType::FT_6AXIS : SensorType::NONE;
+      finger_sensor_mask_ = fingertip_sensor_ ?
+          static_cast<uint8_t>((1 << finger_count_) - 1) : 0x00;
+    }
 
     std::cout << "========================================" << std::endl;
     std::cout << "Device Info:" << std::endl;
@@ -227,7 +502,23 @@ void Communication::Connect() {
     std::cout << "  Configured Model: " << ModelToString(model_) << std::endl;
     std::cout << "  Actual Model:     " << ModelToString(actual_model_) << std::endl;
 
-    // Validate model
+    if (resp_length >= 9) {
+      std::cout << "  Sensor Type:      0x" << std::hex
+                << static_cast<int>(payload[5]) << std::dec << std::endl;
+      std::string mask_bin = "0b";
+      for (int b = 7; b >= 0; --b) {
+        mask_bin += (finger_sensor_mask_ & (1 << b)) ? '1' : '0';
+      }
+      std::cout << "  Finger Mask:      " << mask_bin << std::endl;
+      std::cout << "  Finger Sensor:    ";
+      for (int i = finger_count_ - 1; i >= 0; --i) {
+        bool equipped = finger_sensor_mask_ & (1 << i);
+        std::cout << "F" << (i + 1) << ":" << (equipped ? "ON" : "--");
+        if (i > 0) std::cout << " ";
+      }
+      std::cout << std::endl;
+    }
+
     if (model_ != actual_model_) {
       std::cerr << "========================================" << std::endl;
       std::cerr << "WARNING: Model mismatch detected!" << std::endl;
@@ -235,19 +526,39 @@ void Communication::Connect() {
       std::cerr << "  Got:      " << ModelToString(actual_model_) << std::endl;
       std::cerr << "  Please check your URDF/xacro configuration." << std::endl;
       std::cerr << "========================================" << std::endl;
+
+      // A mismatch that changes the actuator count mis-frames every response,
+      // so fail at connect time instead of flapping at runtime.
+      const int actual_motor_count = GetMotorCount(actual_model_);
+      const int actual_byte_per_motor = GetBytePerMotor(actual_model_);
+      if (actual_motor_count != motor_count_ ||
+          actual_byte_per_motor != byte_per_motor_) {
+        Disconnect();
+        throw std::runtime_error(
+            "Model mismatch changes the frame layout: configured " +
+            ModelToString(model_) + " (" + std::to_string(motor_count_) +
+            " motors x " + std::to_string(byte_per_motor_) +
+            " B) vs device " + ModelToString(actual_model_) + " (" +
+            std::to_string(actual_motor_count) + " motors x " +
+            std::to_string(actual_byte_per_motor) +
+            " B). Fix delto_model in the URDF/xacro.");
+      }
     } else {
       std::cout << "  Status:           OK (Model matched)" << std::endl;
     }
     std::cout << "========================================" << std::endl;
   }
 
+  expected_response_length_ = CalculateExpectedResponseLength();
+
   std::cout << "Connected to Delto Gripper (Model: " << ModelToString(actual_model_)
             << ", Motors: " << motor_count_ << ")" << std::endl;
 }
 
 void Communication::Disconnect() {
-  if (socket_.is_open()) {
-    socket_.close();
+  if (sockfd_ >= 0) {
+    ::close(sockfd_);
+    sockfd_ = -1;
     std::cout << "Disconnected from Delto Gripper" << std::endl;
   }
 }
@@ -257,95 +568,92 @@ void Communication::Disconnect() {
 // ============================================================================
 
 bool Communication::ReadFullPacket(std::vector<uint8_t>& buffer) {
-  boost::system::error_code ec;
-
-  buffer.resize(expected_response_length_);
-
-  std::size_t bytes_read = boost::asio::read(
-      socket_, boost::asio::buffer(buffer.data(), expected_response_length_),
-      boost::asio::transfer_exactly(expected_response_length_), ec);
-
-  if (ec) {
-    std::cerr << "Read error: " << ec.message() << std::endl;
+  // RecvAll(ptr, 0) trivially succeeds, which would leave the header reads in
+  // GetData() out of bounds on an empty buffer.
+  if (expected_response_length_ <= static_cast<int>(HEADER_SIZE)) {
+    std::cerr << "Invalid expected response length: "
+              << expected_response_length_ << std::endl;
+    return false;
+  }
+  // Frame by the device-declared length: firmware >= 3.0 appends an error
+  // code section after the requested data, so the response can be longer
+  // than the minimum computed from the model/sensor configuration.
+  uint8_t len_buf[2];
+  if (!RecvAll(len_buf, 2, 500)) {
     return false;
   }
 
-  return bytes_read == static_cast<std::size_t>(expected_response_length_);
+  const int declared_length = (static_cast<int>(len_buf[0]) << 8) | len_buf[1];
+  if (declared_length < expected_response_length_ ||
+      declared_length > static_cast<int>(MAX_RESPONSE_LENGTH)) {
+    std::cerr << "Invalid response length: device declared " << declared_length
+              << " but driver expects at least " << expected_response_length_
+              << " (model/sensor configuration mismatch)" << std::endl;
+    return false;
+  }
+
+  buffer.resize(static_cast<std::size_t>(declared_length));
+  buffer[0] = len_buf[0];
+  buffer[1] = len_buf[1];
+  return RecvAll(buffer.data() + 2,
+                 static_cast<std::size_t>(declared_length) - 2, 500);
 }
 
 DeltoReceivedData Communication::GetData() {
+ 
   // Build request packet
+  // JOINT            = 0x01,
+  // CURRENT          = 0x02,
+  // TEMPERATURE      = 0x03,
+  // VELOCITY         = 0x04,
+  // FINGERTIP_SENSOR = 0x05,
+  // GPIO             = 0x06,
+  // MODULE_ERROR     = 0x07,
   std::vector<uint8_t> request;
 
   if (model_ == static_cast<uint16_t>(ModelType::DG3F_B)) {
-    // DG3F-B: Length(2) + CMD(1) + ID(2)
-    request = {0x00, 0x05, GET_DATA_CMD, 0x01, 0x02};
+    request = {0x00, 0x05, GET_DATA_CMD, static_cast<uint8_t>(DataCode::JOINT), static_cast<uint8_t>(DataCode::CURRENT)};
   } else {
-    // New models: Length(2) + CMD(1) + ID(4) [+ optional IDs]
-    request = {0x00, 0x07, GET_DATA_CMD, 0x01, 0x02, 0x03, 0x04};
+    request = {0x00, 0x07, GET_DATA_CMD, static_cast<uint8_t>(DataCode::JOINT), static_cast<uint8_t>(DataCode::CURRENT), static_cast<uint8_t>(DataCode::TEMPERATURE), static_cast<uint8_t>(DataCode::VELOCITY)};
 
     if (SupportsExtendedFeatures()) {
       if (fingertip_sensor_) {
-        request.push_back(0x05);
+        request.push_back(static_cast<uint8_t>(DataCode::FINGERTIP_SENSOR));
       }
       if (io_) {
-        request.push_back(0x06);
+        request.push_back(static_cast<uint8_t>(DataCode::GPIO));
       }
-      // Update length field
+      // Firmware >= 3.0 reports a trailing error code
+      if (firmware_version_.size() >= 2 && firmware_version_[0] >= 3) {
+        request.push_back(static_cast<uint8_t>(DataCode::MODULE_ERROR));
+      }
       request[1] = static_cast<uint8_t>(request.size());
     }
   }
 
+  // No transaction id in this protocol: anything already queued is a stale
+  // reply, and reading it would shift every field by a whole frame.
+  DrainSocket();
+
   // Send request
-  boost::system::error_code ec;
-  socket_.write_some(boost::asio::buffer(request), ec);
-
-  if (ec) {
-    std::cerr << "Error sending request: " << ec.message() << std::endl;
-
-    // Try to reconnect on connection errors
-    if (ec == boost::asio::error::broken_pipe ||
-        ec == boost::asio::error::connection_reset ||
-        ec == boost::asio::error::connection_aborted) {
-      std::cerr << "Connection lost, attempting to reconnect..." << std::endl;
-      try {
-        socket_.close();
-        Connect();
-        socket_.write_some(boost::asio::buffer(request), ec);
-        if (ec) {
-          std::cerr << "Failed to send after reconnection: " << ec.message()
-                    << std::endl;
-          return DeltoReceivedData{};
-        }
-      } catch (const std::exception& e) {
-        std::cerr << "Reconnection failed: " << e.what() << std::endl;
-        return DeltoReceivedData{};
-      }
-    } else {
-      return DeltoReceivedData{};
-    }
+  if (!SendAll(request.data(), request.size())) {
+    throw std::runtime_error("Failed to send GetData request");
   }
 
   // Read response
   std::vector<uint8_t> response;
   if (!ReadFullPacket(response)) {
-    std::cerr << "Failed to read full packet" << std::endl;
-    return DeltoReceivedData{};
+    throw std::runtime_error("Failed to read full packet from gripper");
   }
 
-  // Validate response
-  uint16_t length = CombineMsg(response[0], response[1]);
-  uint8_t cmd = response[2];
+  // ReadFullPacket framed the buffer by the device-declared length and
+  // already rejected anything below the configured minimum.
+  const uint8_t cmd = response[2];
 
-  if (cmd != GET_DATA_CMD ||
-      static_cast<int>(response.size()) != expected_response_length_) {
-    std::cerr << "Invalid header (CMD or LENGTH mismatch)" << std::endl;
-    std::cerr << "Expected: " << expected_response_length_
-              << ", Got: " << response.size() << std::endl;
-    std::cerr << "Received header: CMD = 0x" << std::hex << static_cast<int>(cmd)
-              << ", Length = 0x" << static_cast<int>(length) << std::dec
-              << std::endl;
-    return DeltoReceivedData{};
+  if (cmd != GET_DATA_CMD) {
+    throw std::runtime_error(
+        "Invalid response: CMD 0x" + std::to_string(static_cast<int>(cmd)) +
+        " (expected 0x01)");
   }
 
   // Parse motor data
@@ -362,58 +670,97 @@ DeltoReceivedData Communication::GetData() {
     size_t base = HEADER_SIZE + i * byte_per_motor_;
     [[maybe_unused]] uint8_t motor_id = response[base];
 
-    uint8_t posL = response[base + 1];
-    uint8_t posH = response[base + 2];
-    uint8_t curL = response[base + 3];
-    uint8_t curH = response[base + 4];
+    // Big-endian on the wire: first byte of each field is the HIGH byte.
+    uint8_t pos_hi = response[base + 1];
+    uint8_t pos_lo = response[base + 2];
+    uint8_t cur_hi = response[base + 3];
+    uint8_t cur_lo = response[base + 4];
 
-    int16_t raw_position = CombineMsg(posL, posH);
-    int16_t raw_current = CombineMsg(curL, curH);
+    int16_t raw_position = CombineMsg(pos_hi, pos_lo);
+    int16_t raw_current = CombineMsg(cur_hi, cur_lo);
 
+    if(actual_model_ == static_cast<uint16_t>(ModelType::DG5F_L_S) 
+    || actual_model_ == static_cast<uint16_t>(ModelType::DG5F_R_S)
+    || actual_model_ == static_cast<uint16_t>(ModelType::DG5F_L_S15)
+    || actual_model_ == static_cast<uint16_t>(ModelType::DG5F_R_S15))
+  {
+    received_data.joint[i] = raw_position * POSITION_SCALE_S;
+  } else {
     received_data.joint[i] = raw_position * POSITION_SCALE;
+  }
+  
     received_data.current[i] = raw_current * CURRENT_SCALE;
 
-    // New models have temperature and velocity
     if (IsNewModel()) {
-      uint8_t tempL = response[base + 5];
-      uint8_t tempH = response[base + 6];
-      int16_t raw_temperature = CombineMsg(tempL, tempH);
+      uint8_t temp_hi = response[base + 5];
+      uint8_t temp_lo = response[base + 6];
+      int16_t raw_temperature = CombineMsg(temp_hi, temp_lo);
       received_data.temperature[i] = raw_temperature * 0.1;
 
       int8_t raw_vel = ConvertByte(response[base + 7]);
       received_data.velocity[i] =
-          static_cast<double>(raw_vel) * VELOCITY_SCALE * -1;
+          static_cast<double>(raw_vel) * VELOCITY_SCALE;
     }
   }
 
-  // Parse fingertip sensor data (model-specific finger count)
-  if (SupportsExtendedFeatures() && fingertip_sensor_) {
-    size_t ft_base = HEADER_SIZE + motor_count_ * byte_per_motor_;
-    received_data.fingertip_sensor.resize(finger_count_ * 6);  // N fingers × 6 axes
+  // Parse sensor data
+  if (SupportsExtendedFeatures() && fingertip_sensor_ && sensor_type_ != SensorType::NONE) {
+    size_t sensor_base = HEADER_SIZE + motor_count_ * byte_per_motor_;
+    int bytes_per_finger = GetSensorBytesPerFinger();
 
-    for (int finger = 0; finger < finger_count_; finger++) {
-      for (int axis = 0; axis < 6; axis++) {
-        size_t offset = ft_base + (finger * 6 + axis) * 2;
-        uint8_t dataL = response[offset];
-        uint8_t dataH = response[offset + 1];
-        int16_t raw_value = CombineMsg(dataL, dataH);
-
-        if (axis < 3) {
-          // Force (Fx, Fy, Fz): 0.1 N → N
-          received_data.fingertip_sensor[finger * 6 + axis] = raw_value * 0.1;
-        } else {
-          // Torque (Tx, Ty, Tz): 1 mNm → Nm
-          received_data.fingertip_sensor[finger * 6 + axis] = raw_value * 0.001;
+    switch (sensor_type_) {
+      case SensorType::FT_6AXIS:
+      case SensorType::FT_3AXIS:
+      case SensorType::FT_4AXIS: {
+        received_data.fingertip_sensor.resize(finger_count_ * 6);
+        for (int finger = 0; finger < finger_count_; finger++) {
+          for (int axis = 0; axis < 6; axis++) {
+            size_t offset = sensor_base + finger * bytes_per_finger + axis * 2;
+            int16_t raw_value = CombineMsg(response[offset], response[offset + 1]);
+            
+            // 0.1N to N for force, 1 mNm to Nm for torque
+            if (axis < 3) {
+              received_data.fingertip_sensor[finger * 6 + axis] = raw_value * 0.1;
+            } else {
+              received_data.fingertip_sensor[finger * 6 + axis] = raw_value * 0.001;
+            }
+          }
         }
+        break;
       }
+      case SensorType::TACTILE_M: {
+        for (int finger = 0; finger < finger_count_; finger++) {
+          std::vector<uint8_t> cells(15);
+          size_t offset = sensor_base + finger * bytes_per_finger;
+          for (int j = 0; j < 15; j++) {
+            cells[j] = response[offset + j];
+          }
+          received_data.tactile_m.push_back(std::move(cells));
+        }
+        break;
+      }
+      case SensorType::TACTILE_S: {
+        for (int finger = 0; finger < finger_count_; finger++) {
+          std::vector<uint16_t> cells(18);
+          size_t offset = sensor_base + finger * bytes_per_finger;
+          for (int j = 0; j < 18; j++) {
+            cells[j] = (static_cast<uint16_t>(response[offset + j * 2]) << 8) |
+                        response[offset + j * 2 + 1];
+          }
+          received_data.tactile_s.push_back(std::move(cells));
+        }
+        break;
+      }
+      default:
+        break;
     }
   }
 
-  // Parse GPIO data (only for models with GPIO enabled)
+  // Parse GPIO data
   if (SupportsExtendedFeatures() && io_) {
     size_t gpio_base = HEADER_SIZE + motor_count_ * byte_per_motor_;
-    if (fingertip_sensor_) {
-      gpio_base += 2 * 6 * finger_count_;  // 2 bytes × 6 axes × N fingers
+    if (fingertip_sensor_ && sensor_type_ != SensorType::NONE) {
+      gpio_base += GetSensorBytesPerFinger() * GetSensorFingerCount();
     }
 
     received_data.gpio.resize(4);
@@ -422,48 +769,57 @@ DeltoReceivedData Communication::GetData() {
     }
   }
 
+  // Parse error code (firmware >= 3.0, requested via MODULE_ERROR): a 2-byte
+  // big-endian decimal appended after all requested sections.
+  // 400 + error number; 0 = OK.
+  if (SupportsExtendedFeatures() && firmware_version_.size() >= 2 &&
+      firmware_version_[0] >= 3) {
+    size_t error_base = HEADER_SIZE + motor_count_ * byte_per_motor_;
+    if (fingertip_sensor_ && sensor_type_ != SensorType::NONE) {
+      error_base += GetSensorBytesPerFinger() * GetSensorFingerCount();
+    }
+    if (io_) {
+      error_base += GPIO_SIZE;
+    }
+
+    if (response.size() >= error_base + 2) {
+      const uint16_t error_code =
+          (static_cast<uint16_t>(response[error_base]) << 8) |
+          response[error_base + 1];
+      if (error_code != 0) {
+        std::cerr << "[Error] error code : " << error_code << std::endl;
+      }
+    }
+  }
+
   return received_data;
 }
 
 void Communication::SendDuty(std::vector<int>& duty) {
-  std::vector<uint8_t> tcp_data_send;
-
-  uint16_t total_packet_size = 3 + motor_count_ * 3;  // Header + ID(1) + Duty(2) per motor
-  tcp_data_send.resize(total_packet_size);
-
-  tcp_data_send[0] = (total_packet_size >> 8) & 0xFF;  // Length_h
-  tcp_data_send[1] = (total_packet_size) & 0xFF;       // Length_l
-  tcp_data_send[2] = SET_DUTY_CMD;                     // CMD
-
-  for (int i = 0; i < motor_count_; ++i) {
-    tcp_data_send[3 + i * 3] = i + 1;                  // ID
-    tcp_data_send[4 + i * 3] = (duty[i] >> 8) & 0xFF;  // High byte
-    tcp_data_send[5 + i * 3] = (duty[i]) & 0xFF;       // Low byte
+  // Never read past the end of the caller's vector: that would send
+  // uninitialised heap to the motors as a duty command.
+  if (duty.size() < static_cast<std::size_t>(motor_count_)) {
+    throw std::runtime_error(
+        "SendDuty: duty vector has " + std::to_string(duty.size()) +
+        " entries but this model has " + std::to_string(motor_count_) +
+        " motors");
   }
 
-  boost::system::error_code ec;
-  socket_.write_some(boost::asio::buffer(tcp_data_send), ec);
+  uint16_t total_packet_size = 3 + motor_count_ * 3;
+  std::vector<uint8_t> tcp_data_send(total_packet_size);
 
-  if (ec) {
-    std::cerr << "Error sending duty: " << ec.message() << std::endl;
+  tcp_data_send[0] = (total_packet_size >> 8) & 0xFF;
+  tcp_data_send[1] = (total_packet_size) & 0xFF;
+  tcp_data_send[2] = SET_DUTY_CMD;
 
-    // Try to reconnect on connection errors
-    if (ec == boost::asio::error::broken_pipe ||
-        ec == boost::asio::error::connection_reset ||
-        ec == boost::asio::error::connection_aborted) {
-      std::cerr << "Connection lost, attempting to reconnect..." << std::endl;
-      try {
-        socket_.close();
-        Connect();
-        socket_.write_some(boost::asio::buffer(tcp_data_send), ec);
-        if (ec) {
-          std::cerr << "Failed to send after reconnection: " << ec.message()
-                    << std::endl;
-        }
-      } catch (const std::exception& e) {
-        std::cerr << "Reconnection failed: " << e.what() << std::endl;
-      }
-    }
+  for (int i = 0; i < motor_count_; ++i) {
+    tcp_data_send[3 + i * 3] = i + 1;
+    tcp_data_send[4 + i * 3] = (duty[i] >> 8) & 0xFF;
+    tcp_data_send[5 + i * 3] = (duty[i]) & 0xFF;
+  }
+
+  if (!SendAll(tcp_data_send.data(), tcp_data_send.size())) {
+    throw std::runtime_error("Failed to send duty command");
   }
 }
 
@@ -477,19 +833,15 @@ void Communication::SetGPIO(bool output1, bool output2, bool output3) {
     return;
   }
 
-  std::array<uint8_t, 6> request;
-  request[0] = 0x00;                       // Length_h
-  request[1] = 0x06;                       // Length_l
-  request[2] = SET_GPIO_CMD;               // CMD 0x06
-  request[3] = output1 ? 0x01 : 0x00;      // Output 1
-  request[4] = output2 ? 0x01 : 0x00;      // Output 2
-  request[5] = output3 ? 0x01 : 0x00;      // Output 3
+  uint8_t request[6] = {
+    0x00, 0x06, SET_GPIO_CMD,
+    static_cast<uint8_t>(output1 ? 0x01 : 0x00),
+    static_cast<uint8_t>(output2 ? 0x01 : 0x00),
+    static_cast<uint8_t>(output3 ? 0x01 : 0x00)
+  };
 
-  boost::system::error_code ec;
-  socket_.write_some(boost::asio::buffer(request), ec);
-
-  if (ec) {
-    std::cerr << "Error sending GPIO command: " << ec.message() << std::endl;
+  if (!SendAll(request, 6)) {
+    std::cerr << "Error sending GPIO command" << std::endl;
   }
 }
 
@@ -503,17 +855,10 @@ void Communication::SetFTSensorOffset() {
     return;
   }
 
-  std::array<uint8_t, 3> request;
-  request[0] = 0x00;                       // Length_h
-  request[1] = 0x03;                       // Length_l
-  request[2] = SET_FT_SENSOR_OFFSET_CMD;   // CMD 0x0B
+  uint8_t request[3] = {0x00, 0x03, SET_FT_SENSOR_OFFSET_CMD};
 
-  boost::system::error_code ec;
-  socket_.write_some(boost::asio::buffer(request), ec);
-
-  if (ec) {
-    std::cerr << "Error sending F/T sensor offset command: " << ec.message()
-              << std::endl;
+  if (!SendAll(request, 3)) {
+    std::cerr << "Error sending F/T sensor offset command" << std::endl;
   }
 }
 

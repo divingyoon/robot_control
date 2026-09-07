@@ -3,13 +3,11 @@
 <package format="3">
   <name>delto_tcp_comm</name>
   <version>1.0.0</version>
-  <description>Unified TCP communication library for all Delto grippers (DG-3F, DG-4F, DG-5F)</description>
+  <description>Unified TCP communication library for all Delto grippers (DG-3F, DG-4F, DG-5F, DG-5F-S)</description>
   <maintainer email="support@tesollo.com">TESOLLO</maintainer>
   <license>BSD-3-Clause</license>
 
   <buildtool_depend>ament_cmake</buildtool_depend>
-
-  <depend>boost</depend>
 
   <test_depend>ament_lint_auto</test_depend>
   <test_depend>ament_lint_common</test_depend>
