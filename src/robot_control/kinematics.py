@@ -311,6 +311,37 @@ def _lumped(
     return Link(name, mass, moment / mass if mass > 0.0 else np.zeros(3))
 
 
+def with_payload(chain: Chain, mass: float, com: Sequence[float]) -> Chain:
+    """Return *chain* with an extra load folded into its last link.
+
+    `_lumped` deliberately leaves out anything behind a movable joint: where it
+    sits depends on that joint's value, which an arm chain does not carry. For a
+    multi-fingered hand that exclusion is most of the hand — the Tesollo DG-5F
+    keeps 0.85 kg of adapter/base/palm and drops 0.835 kg of fingers, so the
+    wrist gets under a third of the gravity torque it actually carries (2026-08-31
+    measurement; the 2026-07-29 calibration recorded the same shortfall as
+    "j6 about 3.4x under").
+
+    The caller knows the finger angles, so the caller can compute that missing
+    mass and its centre and pass them here. *com* is in the last link's frame,
+    the same frame `Link.com` uses.
+
+    The chain is not modified; a new one is returned.
+    """
+    if mass < 0.0:
+        raise KinematicsError(f"payload mass cannot be negative, got {mass}")
+    com = np.asarray(com, dtype=float)
+    if com.shape != (3,):
+        raise KinematicsError(f"a payload centre needs three values, got {com.size}")
+    if mass == 0.0:
+        return chain
+    last = chain.links[-1]
+    total = last.mass + mass
+    merged = (last.mass * last.com + mass * com) / total
+    links = list(chain.links[:-1]) + [Link(last.name, total, merged)]
+    return Chain(chain.joints, links, chain.tip)
+
+
 def _link(element: ElementTree.Element) -> Link:
     inertial = element.find("inertial")
     if inertial is None:

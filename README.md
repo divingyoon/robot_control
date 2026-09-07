@@ -59,3 +59,44 @@ refused when they disagree by more than `--hdgp-max-spread` of their mean —
 the arm's real gains run kp 70 / 60 / 10, where the average describes no joint
 in the group. Groups with no measurement are left out, so the env keeps its own
 gain; the export names them.
+
+## Teaching poses and trajectories by hand
+
+`robotctl teach` lets an operator move an arm by hand and have it keep the
+pose, name poses, and record and replay motions. The motor gains are fixed at
+bringup, so compliance is made in software: while a hand is pushing, the
+trajectory controller's target is re-commanded to where the arm is, with
+gravity feedforward published beside it (see `src/robot_control/teaching.py`).
+
+```bash
+./ros_ws/load_effort_controllers.sh right        # the feedforward path
+robotctl teach hold   --group openarm_right_arm --gravity 1.1 --payload 0.95,0,0,0.05 --execute
+#   space = lock/unlock, s = save the pose as taught_N, q = quit
+robotctl teach hold   --group openarm_left_arm --group openarm_left_gripper --gravity 1.0 --execute
+#   an arm and its gripper together: the gripper is opened and closed by hand too
+robotctl teach hold   --group openarm_right_arm --group tesollo_hand --gravity 1.1 \
+    --urdf ~/rl_ws/urdf/generated/rl/openarm_tesollo_sensor_rl.urdf --payload 0.95,-0.0045,-0.0172,0.2215 \
+    --soft-p tesollo_hand=1.0 --execute
+#   the hand's own loop makes it stiff to push: --soft-p lowers its PID p for the session
+robotctl teach record --group openarm_right_arm --gravity 1.1 --output demo.npz --execute
+robotctl teach replay --group openarm_right_arm --input demo.npz --repeat 3 --execute
+robotctl teach save   --group openarm_right_arm --name pour_start --gravity 1.1
+robotctl teach goto   --group openarm_right_arm --name pour_start --execute
+robotctl teach list
+```
+
+`--group` repeats: every group given is driven in its own lane, and
+recordings, poses and replays cover them all. Lanes on different joint-state
+topics get their own backend and are merged onto the first lane's clock. The
+Tesollo hand is one lane, `tesollo_hand`, joined at runtime from the profile's
+four phalanx groups (a partial stream to one controller would undo the other
+lanes' hold).
+Gravity feedforward goes only to groups with an effort controller. A push is a
+deflection past the standing droop (`--push-rad`, default 0.02 rad, or 5% of a
+joint's range where that is smaller, as it is for a gripper's stroke); the arm latches once it has rested `--still-sec`, and a push that never
+rests is cut off after `--max-follow-sec` as gravity-model drift. A replay is
+authorized whole before the arm moves and refused, not slowed, if the
+recording asks for more than the profile allows. Every session releases the
+feedforward torque when it ends unless `--keep-gravity` is passed, so the arm
+sags by its droop; poses saved from inside a session carry the scale that was
+holding them and `goto` puts it back on.

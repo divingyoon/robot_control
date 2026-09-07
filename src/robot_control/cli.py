@@ -167,6 +167,14 @@ _URDF_OVERRIDE_HELP = (
     "description — the generated asset URDF (canonical names, hand masses "
     "included) is the usual override"
 )
+# A chain drops every link behind a movable joint, so a multi-fingered hand
+# contributes only its palm and the wrist is modelled far too light. The caller
+# knows the finger angles, so the caller supplies what the model left out.
+_PAYLOAD_HELP = (
+    "extra load on the last link the model leaves out, as MASS,X,Y,Z (kg and "
+    "metres in that link's frame) — a multi-fingered hand needs this or the "
+    "wrist gets a fraction of its real gravity torque"
+)
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -366,6 +374,10 @@ def _parser() -> argparse.ArgumentParser:
                 "before one scalar is refused as describing none of them",
             )
     _add_pose(commands)
+    # Imported here, not at module level: teach_cli imports this module.
+    from .teach_cli import add_parser as _add_teach
+
+    _add_teach(commands)
     return parser
 
 
@@ -464,6 +476,7 @@ def _add_pose(commands: argparse._SubParsersAction) -> None:
         help="seconds to publish at each scale before measuring",
     )
     gravity.add_argument("--urdf", type=Path, help=_URDF_OVERRIDE_HELP)
+    gravity.add_argument("--payload", help=_PAYLOAD_HELP)
     gravity.add_argument("--execute", action="store_true")
 
     torque = stages.add_parser(
@@ -1015,18 +1028,49 @@ def _group_chain(urdf: str, profile, group):
     )
 
 
-def _gravity_chain(adapter, profile, group, urdf_path=None):
+def _parse_payload(text):
+    """`MASS,X,Y,Z` -> (mass, centre). Returns None for None, raises on garbage."""
+    if text is None:
+        return None
+    parts = [piece.strip() for piece in str(text).split(",")]
+    if len(parts) != 4:
+        raise SystemExit(
+            f"--payload takes MASS,X,Y,Z (four values), got {len(parts)}: {text!r}"
+        )
+    try:
+        values = [float(piece) for piece in parts]
+    except ValueError as exc:
+        raise SystemExit(f"--payload values must be numbers: {text!r}") from exc
+    return values[0], values[1:]
+
+
+def _gravity_chain(adapter, profile, group, urdf_path=None, payload=None):
     """Build the group's chain from *urdf_path*, or the running stack's URDF.
 
     An explicit file wins: the bringup description carries the vendor's
     masses, and a hand the vendor never mounted is exactly what an asset URDF
     override is for.
+
+    *payload* adds back what `_lumped` leaves out behind movable joints — for a
+    Tesollo DG-5F that is 0.835 kg of fingers, without which the wrist is
+    modelled at under a third of the torque it carries.
     """
+    from .kinematics import with_payload
+
     if urdf_path is not None:
         urdf = Path(urdf_path).read_text()
     else:
         urdf = adapter.read_robot_description()
-    return _group_chain(urdf, profile, group)
+    chain = _group_chain(urdf, profile, group)
+    parsed = _parse_payload(payload)
+    if parsed is None:
+        return chain
+    mass, centre = parsed
+    print(
+        f"payload {mass:.4f} kg at ({centre[0]:+.5f}, {centre[1]:+.5f}, "
+        f"{centre[2]:+.5f}) m folded into {chain.links[-1].name}"
+    )
+    return with_payload(chain, mass, centre)
 
 
 def _pose_gravity(args, profile) -> int:
@@ -1090,7 +1134,9 @@ def _pose_gravity(args, profile) -> int:
         _check_scales(step, group)
 
     with RosAdapter(profile, args.group, execute=args.execute) as adapter:
-        chain = _gravity_chain(adapter, profile, group, args.urdf)
+        chain = _gravity_chain(
+            adapter, profile, group, args.urdf,
+            getattr(args, "payload", None))
         state = adapter.read_state()
         modelled = chain.gravity_torque(state)
         gate = _gate(profile, group, seed=None)
@@ -1232,7 +1278,9 @@ def _pose_torque(args, profile) -> int:
 
     limits = _joint_limits(profile, group)
     with RosAdapter(profile, args.group, execute=args.execute) as adapter:
-        chain = _gravity_chain(adapter, profile, group, args.urdf)
+        chain = _gravity_chain(
+            adapter, profile, group, args.urdf,
+            getattr(args, "payload", None))
         gate = _gate(profile, group, seed=None)
         print(
             # One fewer than the staircase's torques: the first is where the
@@ -1400,7 +1448,9 @@ def _pose_follow(args, profile) -> int:
 
     period = 1.0 / profile.endpoint().command_rate_hz
     with RosAdapter(profile, args.group, execute=args.execute) as adapter:
-        chain = _gravity_chain(adapter, profile, group, args.urdf)
+        chain = _gravity_chain(
+            adapter, profile, group, args.urdf,
+            getattr(args, "payload", None))
         gate = _gate(profile, group, seed=None)
         adapter.watch_marker()
         state = adapter.read_state()
@@ -2408,7 +2458,9 @@ def _collect_poses(args, profile) -> list[Path] | None:
     rate = profile.endpoint().command_rate_hz
 
     with RosAdapter(profile, args.group, execute=args.execute) as adapter:
-        chain = _gravity_chain(adapter, profile, group, args.urdf)
+        chain = _gravity_chain(
+            adapter, profile, group, args.urdf,
+            getattr(args, "payload", None))
         design = design_pose_set(
             chain.gravity_torque,
             np.array([joint.lower for joint in limits]),
@@ -2572,6 +2624,10 @@ def main(argv: list[str] | None = None) -> int:
     args = _parser().parse_args(argv)
     if args.command == "pose":
         return _pose(args)
+    if args.command == "teach":
+        from .teach_cli import run as _teach_run
+
+        return _teach_run(args)
     profile = load_builtin_profile(args.profile)
     if args.stage == "preflight":
         print(f"profile: {profile.name}")
