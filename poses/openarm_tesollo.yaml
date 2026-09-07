@@ -1,0 +1,58 @@
+schema: 1
+profile: openarm_tesollo
+poses:
+  g1_right_home:
+    groups:
+    - openarm_right_arm
+    saved_at: 2026-09-03T06:37:01 from g1_y00.csv t=0
+    gravity:
+      r_aj_1: 1.1
+      r_aj_2: 1.1
+      r_aj_3: 1.1
+      r_aj_4: 1.1
+      r_aj_5: 1.1
+      r_aj_6: 1.1
+      r_aj_7: 1.1
+    joints:
+      r_aj_1: 0.033833
+      r_aj_2: 0.397248
+      r_aj_3: 0.600483
+      r_aj_4: 0.963325
+      r_aj_5: 0.027885
+      r_aj_6: 0.704133
+      r_aj_7: 0.422856
+  pour_left_home:
+    groups:
+    - openarm_left_arm
+    - openarm_left_gripper
+    saved_at: 2026-09-03T06:19:02 from hdgp/log/pour/right_pour_sensor.md
+    gravity:
+      l_aj_1: 1.0
+      l_aj_2: 1.0
+      l_aj_3: 1.0
+      l_aj_4: 1.0
+      l_aj_5: 1.0
+      l_aj_6: 1.0
+      l_aj_7: 1.0
+    joints:
+      l_aj_1: -0.315
+      l_aj_2: -0.079
+      l_aj_3: 0.217
+      l_aj_4: 0.513
+      l_aj_5: 0.666
+      l_aj_6: -0.729
+      l_aj_7: -0.957
+      l_hj_gripper_1: 0.044
+  right_taught_1:
+    groups:
+    - openarm_right_arm
+    saved_at: '2026-09-03T08:02:08'
+    gravity: null
+    joints:
+      r_aj_1: 0.2908751049057745
+      r_aj_2: 0.34275577935454216
+      r_aj_3: 0.019264515144579164
+      r_aj_4: 0.5289158464942414
+      r_aj_5: 0.0036240177004653873
+      r_aj_6: 0.41142137788967936
+      r_aj_7: 0.9981307698176547

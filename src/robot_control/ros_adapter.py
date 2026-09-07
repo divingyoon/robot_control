@@ -330,18 +330,31 @@ class RosAdapter:
         self._recording = True
 
     def stop_recording(self) -> Recording:
-        """Return what arrived, in this group's canonical order.
+        """Return what arrived, in this group's canonical order."""
+        return self.stop_recording_groups([self.group.name])
 
-        A message that does not cover the whole group is counted rather than
-        raised on: during bringup, or if a controller drops out mid-run, some
-        messages legitimately do not carry every joint, and losing the rest of
-        the run over it would be worse than recording the gap.
+    def stop_recording_groups(self, group_names: Sequence[str]) -> Recording:
+        """Return what arrived, the named groups' joints side by side.
+
+        Several groups at once because a teaching session drives an arm and its
+        gripper on the same joint-state stream, and one recording of both is
+        what replays them together. Columns follow the groups in the order
+        given, each in its canonical order.
+
+        A message that does not cover every joint asked for is counted rather
+        than raised on: during bringup, or if a controller drops out mid-run,
+        some messages legitimately do not carry every joint, and losing the
+        rest of the run over it would be worse than recording the gap.
         """
         if not self._recording:
             raise AdapterUnavailable(
                 "not recording; call start_recording() before stop_recording()"
             )
         self._recording = False
+        names = list(group_names)
+        joints = tuple(
+            joint for name in names for joint in self.profile.groups[name].joints
+        )
         samples = self._backend.stop_recording()
         stamps: list[int] = []
         rows: list[np.ndarray] = []
@@ -349,7 +362,12 @@ class RosAdapter:
         for stamp_ns, source in samples:
             try:
                 rows.append(
-                    self.interface.group_state_to_canonical(self.group.name, source)
+                    np.concatenate(
+                        [
+                            self.interface.group_state_to_canonical(name, source)
+                            for name in names
+                        ]
+                    )
                 )
             except InterfaceError:
                 incomplete += 1
@@ -357,14 +375,12 @@ class RosAdapter:
             stamps.append(int(stamp_ns))
         if not rows:
             raise AdapterUnavailable(
-                f"no {self.state_topic} covering group {self.group.name!r} was "
-                f"recorded ({incomplete} message(s) arrived without it); is the "
+                f"no {self.state_topic} covering groups {names} was recorded "
+                f"({incomplete} message(s) arrived without them); is the "
                 "bringup running, and is the loop calling pump()?"
             )
         return Recording(
-            np.asarray(stamps, dtype=np.int64),
-            np.vstack(rows),
-            tuple(self.group.joints),
+            np.asarray(stamps, dtype=np.int64), np.vstack(rows), joints,
             incomplete=incomplete,
         )
 
@@ -432,6 +448,33 @@ class RosAdapter:
             period_sec,
         )
 
+    def read_gain_p(self, timeout_sec: float = DEFAULT_TIMEOUT_SEC) -> dict[str, float]:
+        """The controller's PID ``p`` per joint, by canonical name.
+
+        Only a controller that closes its own loop declares these — the
+        Tesollo hand's does, the arms' position-interface controllers do not
+        — and one that declares none answers with an empty mapping.
+        """
+        names = self.interface.group_source_names(self.group.name)
+        found = self._backend.controller_gain_p(self.group.controller, names, timeout_sec)
+        return {
+            canonical: found[source]
+            for canonical, source in zip(self.group.joints, names)
+            if source in found
+        }
+
+    def write_gain_p(self, values: Mapping[str, float]) -> None:
+        """Set the controller's PID ``p`` per joint, given by canonical name."""
+        self._require_execute()
+        source_of = dict(zip(self.group.joints, self.interface.group_source_names(self.group.name)))
+        unknown = [name for name in values if name not in source_of]
+        if unknown:
+            raise ValueError(f"not in group {self.group.name!r}: {unknown}")
+        self._backend.set_controller_gain_p(
+            self.group.controller,
+            {source_of[name]: float(value) for name, value in values.items()},
+        )
+
     def send_gripper(self, position: float) -> None:
         """Send an authorized canonical position to the group's gripper action."""
         self._require_execute()
@@ -471,6 +514,8 @@ REQUIRED_INTERFACES = (
     "control_msgs/msg/JointTrajectoryControllerState",
     "geometry_msgs/msg/Pose",
     "moveit_msgs/srv/GetPositionIK",
+    "rcl_interfaces/srv/GetParameters",
+    "rcl_interfaces/srv/SetParameters",
     "sensor_msgs/msg/JointState",
     "trajectory_msgs/msg/JointTrajectory",
     "visualization_msgs/srv/GetInteractiveMarkers",
@@ -574,7 +619,13 @@ class _RclpyBackend:
         # from inside an existing rclpy application does not tear it down.
         self._owns_context = not rclpy.ok()
         if self._owns_context:
-            rclpy.init()
+            # Keep Python's own SIGINT handling. rclpy's handler shuts the
+            # context down the moment Ctrl-C arrives, and a servo loop that is
+            # interrupted mid-spin then cannot publish the zero effort that
+            # releases the arm: the torque it was holding stays on the wire.
+            from rclpy.signals import SignalHandlerOptions
+
+            rclpy.init(signal_handler_options=SignalHandlerOptions.NO)
         self._node = rclpy.create_node(node_name)
         self._joint_topic = joint_topic
         self._joint_subscription = None
@@ -593,7 +644,11 @@ class _RclpyBackend:
 
     def close(self) -> None:
         self._node.destroy_node()
-        if self._owns_context:
+        # SIGINT reaches rclpy's own handler before it reaches the loop as
+        # KeyboardInterrupt, and that handler has already shut the context
+        # down by the time this runs; shutting it down again is an RCLError
+        # thrown after the arm was already released, which reads as a crash.
+        if self._owns_context and self._rclpy.ok():
             self._rclpy.shutdown()
 
     def joint_states(self, timeout_sec: float) -> dict[str, float]:
@@ -941,6 +996,45 @@ class _RclpyBackend:
                 raise AdapterUnavailable(f"{action_name} failed: {reason}")
         finally:
             client.destroy()
+
+    def controller_gain_p(
+        self, controller: str, joints: Sequence[str], timeout_sec: float
+    ) -> dict[str, float]:
+        from rcl_interfaces.srv import GetParameters
+
+        client = self._node.create_client(GetParameters, f"/{controller}/get_parameters")
+        request = GetParameters.Request()
+        request.names = [f"gains.{joint}.p" for joint in joints]
+        result = self._call(client, request, timeout_sec, f"{controller} parameters")
+        found = {}
+        for joint, value in zip(joints, result.values):
+            # type 3 is PARAMETER_DOUBLE; an undeclared gain comes back NOT_SET.
+            if value.type == 3:
+                found[joint] = float(value.double_value)
+        return found
+
+    def set_controller_gain_p(self, controller: str, values: Mapping[str, float]) -> None:
+        from rcl_interfaces.msg import Parameter, ParameterType, ParameterValue
+        from rcl_interfaces.srv import SetParameters
+
+        client = self._node.create_client(SetParameters, f"/{controller}/set_parameters")
+        request = SetParameters.Request()
+        # One call for all of them: forty separate sets take tens of seconds.
+        request.parameters = [
+            Parameter(
+                name=f"gains.{joint}.p",
+                value=ParameterValue(type=ParameterType.PARAMETER_DOUBLE, double_value=float(p)),
+            )
+            for joint, p in values.items()
+        ]
+        result = self._call(client, request, DEFAULT_TIMEOUT_SEC, f"{controller} parameters")
+        refused = [
+            f"{joint}: {answer.reason}"
+            for joint, answer in zip(values, result.results)
+            if not answer.successful
+        ]
+        if refused:
+            raise AdapterUnavailable(f"{controller} refused a gain: {'; '.join(refused)}")
 
     def _call(
         self, client: Any, request: Any, timeout_sec: float, name: str
