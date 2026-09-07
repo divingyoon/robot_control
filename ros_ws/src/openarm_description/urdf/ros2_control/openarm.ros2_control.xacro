@@ -69,6 +69,17 @@
             <param name="initial_value">0.0</param>
           </state_interface>
 
+          <!-- Damiao motor thermistors, degrees C. The MIT feedback frame has
+               always carried both; exporting them lets the thermal guard judge
+               real temperature instead of integrating torque over time. -->
+          <state_interface name="temperature_rotor">
+            <param name="initial_value">0.0</param>
+          </state_interface>
+
+          <state_interface name="temperature_mos">
+            <param name="initial_value">0.0</param>
+          </state_interface>
+
         </joint>
       </xacro:macro>
 
